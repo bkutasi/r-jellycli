@@ -222,24 +222,10 @@ These manual tests require a valid `credentials.json` file in the project root w
 }
 ```
 
-> **Note**: The `credentials.json` file should not be committed to version control.
-
 ## Development Roadmap
 
 Planned features:
 
 - Improved error handling
-- Video playback support
-- Search functionality
-- Playlist management
-- Better streaming with format detection
-- Improved UI with colors and more interactive elements
-- Support for more playback systems beyond ALSA
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-MIT
+- Remote client interaction
+- Better logging
