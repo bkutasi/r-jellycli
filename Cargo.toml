@@ -1,12 +1,43 @@
 [package]
-name = "jellyfin-cli"
+name = "r-jellycli"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.1.6", features = ["derive"] }
-reqwest = { version = "0.11", features = ["json"] }
+clap = { version = "4.1.6", features = ["derive", "env"] }
+reqwest = { version = "0.11", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.21.2", features = ["full"] }
 alsa = "0.6.0"
 serde_json = "1.0"
+dirs = "5.0.1"
+urlencoding = "2.1.0"
+indicatif = "0.17"
+symphonia = { version = "0.5", features = ["all-formats", "all-codecs"] }
+bytes = "1.4" # Needed for Symphonia's MediaSourceStream
+futures-util = "0.3"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.10.1"
+
+# Manual test utilities registered as binaries
+[[bin]]
+name = "auth_test"
+path = "tests/manual/auth_test.rs"
+
+[[bin]]
+name = "api_test"
+path = "tests/manual/api_test.rs"
+
+[[bin]]
+name = "jellyfin_auth"
+path = "tests/manual/jellyfin_auth.rs"
+
+[[bin]]
+name = "test_connection"
+path = "tests/manual/test_connection.rs"
+
+[[bin]]
+name = "direct_auth_test"
+path = "tests/manual/direct_auth_test.rs"

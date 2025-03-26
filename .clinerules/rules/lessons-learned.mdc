@@ -1,0 +1,165 @@
+# Lessons Learned
+
+## Project Patterns
+
+### Architectural Patterns
+
+1. **Modular Component Design**
+   - The project is designed with clear separation between API client, playback engine, and user interface
+   - This allows for isolated development and testing of each component
+   - Future expansion can be done by enhancing specific modules without affecting others
+
+2. **Command-Line First**
+   - Starting with CLI foundation provides essential functionality without UI complexity
+   - Enables focus on core features before adding interface enhancements
+   - CLI structure can later form the basis for TUI or GUI implementations
+
+3. **Streaming Pipeline Architecture**
+   - Data flows through distinct stages: API fetch → decode → buffer → playback
+   - Each stage can be optimized independently
+   - Allows for potential parallel processing of pipeline stages
+
+### Development Patterns
+
+1. **Rust Ecosystem Utilization**
+   - Leveraging mature crates (clap, reqwest, tokio) accelerates development
+   - Following Rust idioms for error handling and resource management
+   - Using strong typing to prevent runtime errors
+
+2. **API-First Implementation**
+   - Focus on robust API client before complex playback features
+   - Ensures data availability and format compatibility early in development
+   - Allows for testing with real-world Jellyfin server data
+
+## Technical Insights
+
+1. **ALSA Integration Complexities**
+   - ALSA API requires careful configuration of parameters (device names, sample rates, format)
+   - Buffer management critical for smooth playback
+   - Direct hardware access provides performance benefits but adds complexity
+   - Device names vary by system and need (hw:X,Y,Z format for direct access, plughw: for conversion)
+   - Device selection impacts both compatibility and performance
+   - Loopback devices (hw:Loopback,X,Y) enable integration with audio processing tools like CamillaDSP
+   - Sample rate must match other components in audio processing chain (48000Hz common for DSP)
+
+2. **Jellyfin API Structure**
+   - RESTful API with authentication via X-Emby-Token header
+   - Hierarchical organization of media items (libraries → folders → items)
+   - Streaming endpoints require specific format parameters
+
+3. **Rust Async Considerations**
+   - Tokio runtime provides efficient handling of I/O operations
+   - Async/await syntax simplifies asynchronous code flow
+   - Need to manage shared state carefully in async context
+  - Serde requires explicit `#[serde(rename = "...")]` for case-sensitive JSON field mapping.
+  - `clap` arguments with `default_value` become `String`, not `Option<String>`, affecting how fallback logic (like for env vars) must be implemented.
+
+
+## Project Decisions and Evolution
+
+### Initial Design Decisions
+
+1. **Language Choice: Rust**
+   - Selected for performance, safety, and modern language features
+   - Strong ecosystem support for required capabilities
+   - Cross-platform potential despite initial Linux focus
+
+2. **ALSA for Audio**
+   - Native Linux solution with good performance
+   - Direct hardware access without intermediate layers
+   - Rust binding library available and actively maintained
+
+3. **Command-Line Interface**
+   - Simplifies initial development
+   - Accessible on headless systems
+   - Fits target user demographic (power users, server administrators)
+
+### Evolved Understanding
+
+1. **Media Streaming Complexity**
+   - Audio formats require specific decoding approaches
+   - Buffer management critical for uninterrupted playback
+   - Network conditions significantly impact streaming performance
+
+2. **User Experience Importance**
+   - Even CLI applications benefit from thoughtful UX design
+   - Clear feedback and status information essential
+   - Progressive disclosure of complexity improves usability
+
+3. **API Compatibility Challenges**
+   - Jellyfin API can vary between server versions
+   - Authentication methods have different security implications
+   - Response formats may require flexible parsing with field aliases
+   - JSON field names may differ in casing between server versions
+   - Empty responses need careful handling to prevent parsing errors
+  - Providing multiple configuration methods (CLI, Env Vars, File) increases flexibility, especially for containerized environments. Clear precedence rules are essential.
+
+
+## User Preferences and Feedback
+
+1. **Authentication Security**
+   - Preference for storing credentials in dedicated files rather than command line
+   - Concern about exposing passwords in process listings or history
+   - Need for secure credential storage that doesn't compromise debugging
+
+2. **Debugging Capabilities**
+   - Value in detailed logging during development
+   - Need for selective debug levels in production
+   - Preference for test modes that isolate components
+
+## Best Practices Identified
+
+1. **Error Handling**
+   - Provide clear, actionable error messages
+   - Implement graceful degradation when possible
+   - Log detailed information for debugging
+   - Preserve original error information when wrapping errors
+   - Add context to errors at each level of abstraction
+
+2. **Configuration Management**
+   - Store persistent settings in standard locations
+   - Support command-line overrides for flexibility
+   - Validate configuration values before use
+   - Handle sensitive information like passwords securely
+   - Support multiple credential input methods for flexibility
+  - Offer multiple configuration methods (CLI, Env Vars, File) with clear precedence.
+
+
+3. **Debugging Strategy**
+   - Implement targeted test modes to isolate components
+   - Add detailed logging at critical points in the code
+   - Log both success and failure paths for debugging
+   - Include data sizes and status codes in HTTP request logs
+   - Implement systematic incremental testing
+  - When debugging compilation errors related to types (e.g., `method not found`), verify the actual type of variables involved, especially when using libraries like `clap` where defaults can change expected types (`Option<String>` vs `String`).
+
+
+3. **Performance Optimization**
+   - Profile critical paths early in development
+   - Optimize buffer sizes for target hardware
+   - Implement appropriate caching strategies
+   - Format-specific fast paths (mono vs multi-channel) can improve audio processing performance
+   - Pre-buffering streamed content can prevent interruptions at the cost of latency
+   - Processing audio in chunks balances memory use and processing overhead
+
+## Future Considerations
+
+1. **Cross-Platform Support**
+   - Abstract audio backend to support multiple platforms
+   - Research platform-agnostic alternatives to ALSA
+   - Consider PortAudio or SDL for wider compatibility
+
+2. **Enhanced User Interface**
+   - TUI library selection will impact development approach
+   - Consider accessibility requirements for interface design
+   - Maintain CLI functionality alongside TUI
+
+3. **Media Format Support**
+   - Evaluate audio codec libraries for format coverage
+   - Consider trade-offs between native decoding and server transcoding
+   - Prioritize formats based on common usage patterns
+   - Audio format conversion requires specialized handling for each format type
+   - Converting between formats requires appropriate scaling (F32 [-1.0,1.0] to S16 [-32768,32767])
+   - Bit-depth reduction requires appropriate strategies (shifting for S32→S16, scaling for F32→S16)
+   - Format handler should gracefully fallback for unsupported formats
+   - Multi-channel audio requires proper interleaving when converting between formats

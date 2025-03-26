@@ -1,0 +1,226 @@
+# Error Documentation
+
+## Known Issues and Resolutions
+
+### API Connection Issues
+
+#### Issue: Unable to connect to Jellyfin server
+- **Symptoms**: Connection timeout or refused connection error when attempting to reach Jellyfin server
+- **Potential Causes**:
+  - Incorrect server URL
+  - Server is offline
+  - Network connectivity issues
+  - Firewall blocking connection
+- **Resolution**:
+  - Verify server URL is correct (including protocol and port)
+  - Check server status
+  - Test network connectivity
+  - Check firewall settings
+
+#### Issue: Authentication failure
+- **Symptoms**: 401 Unauthorized or 403 Forbidden response from API
+- **Potential Causes**:
+  - Invalid API key
+  - API key lacks required permissions
+  - User account issues on server
+- **Resolution**:
+  - Verify API key is correct
+  - Generate new API key if necessary
+  - Check permissions associated with API key on server
+
+#### Issue: Password interpretation errors with special characters
+- **Symptoms**: Authentication fails when using passwords with special characters via command line
+- **Potential Causes**:
+  - Shell interpretation of special characters in passwords
+  - Password truncation when using unescaped characters like $ or ^
+- **Resolution**:
+  - Properly quote password string in command line (use single quotes)
+  - Use credentials.json file instead of command line arguments
+  - Set password via JELLYFIN_PASSWORD environment variable
+
+#### Issue: JSON parsing errors in authentication response
+- **Symptoms**: Error "missing field 'id'" or "EOF while parsing a value"
+- **Potential Causes**:
+  - Field name casing differences between server versions
+  - Empty responses due to connection issues
+  - Attempting to parse responses before checking status codes
+- **Resolution**:
+  - Use serde field aliases to handle casing variations
+  - Add proper error handling for empty responses
+  - Implement test mode to verify authentication separate from other functionality
+
+
+#### Issue: JSON parsing error: missing field `id` when fetching media items
+- **Symptoms**: `Error: InvalidResponse("Failed to parse items response")` with detail `JSON parsing error: missing field 'id' at line X column Y`.
+- **Potential Causes**:
+  - Mismatch between Rust struct field names (e.g., `id`) and JSON keys (e.g., `Id`). Serde is case-sensitive by default.
+  - Struct expects a field that is missing or null in the JSON, and the field is not marked as `Option<T>`.
+- **Resolution**:
+  - Use `#[serde(rename = "JsonFieldName")]` attribute on struct fields to map them correctly to JSON keys, respecting case sensitivity.
+  - Ensure fields that might be missing or null in the JSON are defined as `Option<T>` in the Rust struct.
+  - Verify the struct definition (`src/jellyfin/models.rs`) matches the actual JSON response structure from the Jellyfin API (`/Users/{UserId}/Views` or `/Users/{UserId}/Items`).
+
+### Audio Playback Issues
+
+#### Issue: ALSA device not found
+- **Symptoms**: Error when attempting to open ALSA device
+- **Potential Causes**:
+  - Incorrect device name
+  - Device not connected
+  - ALSA not properly configured
+- **Resolution**:
+  - Check device name with `aplay -L`
+  - Verify hardware connections
+  - Test ALSA setup with `aplay` command
+  - Try different device prefixes (hw:, plughw:, dmix:) based on requirements
+  
+#### Issue: ALSA device busy
+- **Symptoms**: Error "Resource busy" when trying to open ALSA device
+- **Potential Causes**:
+  - Another application is using the device
+  - The device is configured for exclusive access
+  - PipeWire or PulseAudio controlling the device
+- **Resolution**:
+  - Check for other applications using the device with `sudo fuser -v /dev/snd/*`
+  - Try a different subdevice (e.g., hw:Loopback,0,0 instead of hw:Loopback,1,0)
+  - Try a device that allows sharing (dmix: prefix)
+  - Test the device directly with `speaker-test -D <device> -c 2 -r 48000 -t wav`
+  - Temporarily stop audio servers if needed: `systemctl --user stop pipewire.service`
+
+#### Issue: No sound during playback
+- **Symptoms**: No audible output despite successful connection to ALSA device
+- **Potential Causes**:
+  - Volume too low
+  - Incorrect audio format
+  - Sample rate mismatch
+  - Audio device muted
+  - Format conversion error
+  - Incompatible device configuration
+- **Resolution**:
+  - Check volume settings with `alsamixer`
+  - Verify audio format parameters
+  - Force sample rate to match the device capabilities (e.g., 48000Hz for CamillaDSP)
+  - Test with `hw:Loopback,0,0` device if using with CamillaDSP
+  - Implement proper format conversion for incoming audio formats
+  - In ValueOr::Nearest mode, check the actual rate ALSA is using
+
+#### Issue: Audio Buffer Conversion Error
+- **Symptoms**: Compiler error E0308 for mismatched types between AudioBuffer and AudioBufferRef
+- **Potential Causes**:
+  - Incorrect conversion between AudioBuffer and AudioBufferRef types
+  - Attempting to use AudioBuffer directly when AudioBufferRef is needed
+  - Not properly handling the Cow wrapper for samples
+- **Resolution**:
+  - Use `as_audio_buffer_ref()` for proper type conversion
+  - Dereference Cow wrapper with `&*samples` for slice access
+  - Match on AudioBufferRef variants (S16, F32, U8) for proper sample handling
+- **Affected Components**: Audio playback pipeline in src/audio/playback.rs
+
+#### Issue: Unsupported Audio Format for Playback
+- **Symptoms**: Runtime error "Unsupported audio buffer format for S16 playback"
+- **Potential Causes**:
+  - Incoming audio format not supported by the playback system
+  - Incorrectly accessing audio buffer data
+  - Missing format conversion implementation
+  - Attempting to use non-existent methods on AudioBufferRef
+- **Resolution**:
+  - Implement format-specific conversion logic for each supported format (S16, F32, U8, S24, S32)
+  - Use `buf.planes()` method to access audio data properly
+  - Extract channel data from planes with proper indexing
+  - Add fallback handling for unsupported formats (e.g., use silence)
+  - Implement specialized fast paths for mono vs. multi-channel audio
+- **Affected Components**: Audio playback format conversion in src/audio/playback.rs
+
+### Media Handling Issues
+
+#### Issue: Compilation Error: `no method named 'or_else' found for struct 'std::string::String'`
+- **Symptoms**: Rust compiler error `E0599` when trying to use `.or_else()` on a `String`.
+- **Potential Causes**:
+  - `or_else` is a method for `Option<T>`, not `String`.
+  - Incorrectly assuming a variable is an `Option<String>` when it's actually a `String` (e.g., a `clap` argument with a `default_value` is always `String`, not `Option<String>`).
+- **Resolution**:
+  - Check the type of the variable you are calling `.or_else()` on.
+  - If the variable is `String` (like a `clap` arg with a default), use standard `if/else` logic or other string methods to handle fallback values instead of `or_else`.
+  - Example fix for ALSA device precedence (CLI > Env Var > Default):
+    ```rust
+    let alsa_device_cli = args.alsa_device.clone(); // This is String due to default_value
+    let alsa_device_env = std::env::var("ALSA_DEVICE").ok(); // This is Option<String>
+    
+    settings.alsa_device = if alsa_device_cli != "default" {
+        alsa_device_cli
+    } else if let Some(env_device) = alsa_device_env {
+        env_device
+    } else {
+        "default".to_string()
+    };
+    ```
+
+
+#### Issue: Media items not displayed
+- **Symptoms**: Empty list when fetching media items
+- **Potential Causes**:
+  - No media in the user's library
+  - API endpoint path incorrect
+  - Permission issues for library access
+- **Resolution**:
+  - Verify media exists in Jellyfin library
+  - Check API endpoint URL
+  - Verify user has access to media libraries
+
+## Error Handling Strategy
+
+### Current Implementation
+- Basic error handling using Rust's `Result` type
+- Error messages displayed to user via standard error
+- Application exits on critical errors
+
+### Planned Improvements
+1. **Custom Error Types**
+   - Implement dedicated error types for different categories
+   - Provide more context in error messages
+
+2. **Recovery Mechanisms**
+   - Attempt reconnection on network failures
+   - Fall back to alternative APIs or endpoints when primary fails
+
+3. **User-Friendly Messages**
+   - Translate technical errors into user-friendly language
+   - Provide actionable steps for resolution
+
+4. **Logging System**
+   - Implement debug logging for troubleshooting
+   - Option to save logs for later analysis
+
+## Common Error Codes
+
+| Error Code | Description | Handling Strategy |
+|------------|-------------|-------------------|
+| ALSA_DEVICE_ERROR | Unable to open or configure ALSA device | Verify device name and retry with default device |
+| ALSA_DEVICE_BUSY | ALSA device is in use by another process | Try alternate device/subdevice or dmix: prefix |
+| API_CONNECTION_ERROR | Cannot connect to Jellyfin server | Retry with exponential backoff |
+| AUTH_ERROR | Authentication failed | Prompt for new credentials |
+| MEDIA_FORMAT_ERROR | Unsupported media format | Skip item or attempt transcoding |
+| STREAM_ERROR | Error during media streaming | Restart stream or try different quality |
+| BUFFER_CONVERSION_ERROR | Audio buffer type conversion failure | Verify buffer handling code and sample types |
+| FORMAT_CONVERSION_ERROR | Unsupported audio format conversion | Add format-specific converter or fall back to silence |
+
+## Debugging Tips
+
+1. **Enable Verbose Output**
+   - Add `--verbose` flag (to be implemented)
+   - Shows detailed operation information
+
+2. **Check ALSA Configuration**
+   - Run `aplay -L` to list available devices
+   - Use `alsamixer` to check volume levels
+   - Test direct device access with `speaker-test -D hw:X,Y,Z -c 2 -r 48000 -t wav`
+   - Find processes using sound devices with `sudo fuser -v /dev/snd/*`
+   - Check device status with `cat /proc/asound/card*/pcm*/sub*/status`
+
+3. **Test Jellyfin API**
+   - Use `curl` to test API endpoints manually
+   - Verify API key works in browser
+
+4. **Network Diagnostics**
+   - Check connectivity with `ping` or `traceroute`
+   - Verify no firewall rules blocking connections

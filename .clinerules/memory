@@ -18,8 +18,8 @@ flowchart TD
     
     TC --> AC[tasks/active_context.md ]
 
-    AC --> ER[.cursor/rules/error-documentation.mdc]
-    AC --> LL[.cursor/rules/lessons-learned.mdc ]
+    AC --> ER[.clinerules/rules/error-documentation.mdc]
+    AC --> LL[.clinerules/rules/lessons-learned.mdc ]
     
     subgraph LIT[ docs/literature ]
         L1[...]
@@ -74,11 +74,11 @@ flowchart TD
   - Recent changes
   - Next steps
 
-  6. error-documentation.mdc (.cursor/rules/error-documentation.mdc): 
+  6. error-documentation.mdc (.clinerules/rules/error-documentation.mdc): 
   - During your interaction, if you find a fix to a mistake in this project or a correction you received reusable, you should take note in the @error-documentation.mdc file so you will not make the same mistake again.
   - Known issues: their state, context, and resolution
 
-  7. lessons-learned.mdc (.cursor/rules/lessons-learned.mdc): learning journal for each project
+  7. lessons-learned.mdc (.clinerules/rules/lessons-learned.mdc): learning journal for each project
   - It captures important patterns, preferences, and project intelligence
   - It is detailed in @lessons-learned.mdc
 
@@ -131,7 +131,7 @@ flowchart TD
 flowchart TD
     Start[Start] --> Context[Check Memory Files (Core Files always, rest based on context) ]
     Context --> Update[Update Documentation]
-    Update --> Rules@Update [.cursor/rules/lessons-learned.mdc, .cursor/rules/error-documentation.mdc if needed]
+    Update --> Rules@Update [.clinerules/rules/lessons-learned.mdc, .clinerules/rules/error-documentation.mdc if needed]
     Rules --> Execute[Execute Task]
     Execute --> Document[Document Changes in Memory Files]
 ```
@@ -153,7 +153,7 @@ flowchart TD
         P1[Review Core Files]
         P2[Document Current State in tasks/active_context.md and tasks/tasks_plan.md ]
         P3[Clarify Next Steps and document in tasks/tasks_plan.md ]
-        P4[Update .cursor/rules/lessons-learned.mdc, .cursor/rules/error-documentation.mdc]
+        P4[Update .clinerules/rules/lessons-learned.mdc, .clinerules/rules/error-documentation.mdc]
         
         P1 --> P2 --> P3 --> P4
     end
@@ -165,7 +165,7 @@ Note: When triggered by **update memory files**, I MUST review every Core memory
 
 # Project Intelligence ( lessons-learned.mdc )
 
-The .cursor/rules/lessons-learned.mdc file is my learning journal for each project. It captures important patterns, preferences, and project intelligence that help me work more effectively. As I work with you and the project, I'll discover and document key insights that aren't obvious from the code alone.
+The .clinerules/rules/lessons-learned.mdc file is my learning journal for each project. It captures important patterns, preferences, and project intelligence that help me work more effectively. As I work with you and the project, I'll discover and document key insights that aren't obvious from the code alone.
 
 ```mermaid
 flowchart TD
@@ -174,11 +174,11 @@ flowchart TD
     subgraph Learn [Learning Process]
         D1[Identify Pattern]
         D2[Validate with User]
-        D3@Document in [.cursor/rules/lessons-learned.mdc ]
+        D3@Document in [.clinerules/rules/lessons-learned.mdc ]
     end
     
     subgraph Apply [Usage]
-        A1@Read [.cursor/rules/lessons-learned.mdc ]
+        A1@Read [.clinerules/rules/lessons-learned.mdc ]
         A2[Apply Learned Patterns]
         A3[Improve Future Work]
     end

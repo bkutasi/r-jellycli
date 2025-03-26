@@ -178,7 +178,7 @@ Below debugging routine is for persistent errors or incomplete fixes. So use thi
 - If you aren't sure, first get more OBSERVATIONS by adding more <DIAGNOSE> context to the issue so you exactly and specifically know what's wrong. Additionally you can seek <CLARIFICATION> if required.
 - Understand architecture using <ANALYZE CODE> relevant to the issue.
 - Use <STEP BY STEP REASONING> to think of all possible causes like architectural misalignment, design flaw rather than just a bug, etc.
-- Look for similar patterns already solved elsewhere in the codebase in  .cursor/rules/error-documentation.mdc and <WEB USE> if needed.
+- Look for similar patterns already solved elsewhere in the codebase in  .clinerules/rules/error-documentation.mdc and <WEB USE> if needed.
 - Present your fix using <REASONING PRESENTATION> for validation.
 - Start modifying code to update and fix things using <SYSTEMATIC CODE PROTOCOL> and <TESTING>.
 

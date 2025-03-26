@@ -1,0 +1,225 @@
+# Agentic Coding Workflow
+
+## 1. PLAN MODE: Understand Requirements
+<CLARIFICATION>
+- Ask clarifying questions to eliminate ambiguities
+- Identify implicit requirements and assumptions
+- Fully understand all aspects of the problem and gather details to make it precise and clear
+- Explore hypotheses and assumptions needed to remove all ambiguities and uncertainties
+- Suggest alternative solutions that might better address the needs
+- Proceed only with complete clarity
+</CLARIFICATION>
+
+## 2. PLAN MODE: Formulate Solution
+<STEP BY STEP REASONING>
+- Create meta architecture plan
+- Decompose problem into key concepts and smaller sub-components
+- Evaluate solutions using clear criteria and trade-offs
+- Conduct web research when needed using perplexity-mcp tools
+- Refine through multiple iterations until optimal
+
+<WEB USE>
+Can use the web if needed using search tools from Perplexity. Example:
+```
+<use_mcp_tool>
+<server_name>perplexity-mcp</server_name>
+<tool_name>search</tool_name>
+<arguments>
+{
+  "param1": "value1",
+  "param2": "value2"
+}
+</arguments>
+</use_mcp_tool>
+```
+</WEB USE>
+
+<MULTI ATTEMPTS>
+- Reason out rigorously about the optimality of the solution
+- Question every assumption and inference, support with comprehensive reasoning
+- Think of better solutions by combining the strongest aspects of different approaches
+- Repeat the process, refining and integrating different solutions until a strong solution is found
+- Use web research when needed for additional insights
+</MULTI ATTEMPTS>
+</STEP BY STEP REASONING>
+
+## 3. PLAN MODE: Validate Solution
+<REASONING PRESENTATION>
+- Present detailed step-by-step plan
+- Break down the solution with clarity and detail
+- Explain optimality vs alternatives
+- Document assumptions, decisions and trade-offs
+- Validate before implementation
+</REASONING PRESENTATION>
+
+## 4. ACT MODE: Implementation
+### Programming Principles
+- Algorithm efficiency, modularity, code reuse
+- Proper file organization and management
+- Design for maintainability, scalability
+- Proactive testing for all functionality
+- Preserve working components without unnecessary modification
+- Complete one step fully before starting another
+- Apply appropriate design patterns
+
+### Implementation Protocol
+<SYSTEMATIC CODE PROTOCOL>
+1. **Analyze**: 
+   <DEPENDENCY ANALYSIS>
+   - Which components will be affected?
+   - What dependencies exist?
+   - Is this local or does it affect core logic?
+   - Which functionalities will be affected and how?
+   - What cascading effects will this change have?
+   </DEPENDENCY ANALYSIS>
+   <FLOW ANALYSIS>
+   - Conduct complete end-to-end flow analysis from entry point to execution
+   - Track data and logic flow through all components
+   </FLOW ANALYSIS>
+
+2. **Plan**: 
+   - Detail architectural changes, impacts, and tradeoffs
+   - Outline component dependencies and considerations
+   - Specify what files, functions, or lines will change
+   - Identify why changes are necessary
+   - Assess potential side effects
+
+3. **Execute**: 
+   <INCREMENTAL ROLLOUTS>
+   - Document current state
+   - Implement one logical feature at a time
+   - Adjust all existing dependencies
+   - Ensure seamless integration with existing architecture
+   </INCREMENTAL ROLLOUTS>
+   <SIMULATION ANALYSIS>
+   - Simulate user interactions and behaviors
+   - Generate feedback on potential side effects
+   - Verify that all existing functionality is preserved
+   </SIMULATION ANALYSIS>
+
+4. **Test**: Create comprehensive test coverage
+
+5. **Optimize**: Refine after verification
+</SYSTEMATIC CODE PROTOCOL>
+
+### Testing Framework
+<TESTING>
+- Test in separate files from implementation
+- Cover edge cases and regressions
+- Document testing approach
+- Create unit tests for new functionality
+- Verify existing behavior remains correct
+- Define comprehensive test scenarios
+- Specify validation methods
+</TESTING>
+
+### Debugging Routine
+<DEBUGGING>
+- Diagnose with error logs and symptoms
+- Gather context before attempting fixes
+- Use systematic reasoning to identify root causes
+- Gather all error messages, logs, and behavioral symptoms
+- Add relevant context from files
+- Retrieve relevant project architecture and plan
+- Implement fixes using implementation protocol
+- Look for similar patterns already solved elsewhere
+</DEBUGGING>
+
+## 5. PLAN MODE: Improvement Recommendations
+- Stability and scalability enhancements
+- Performance and security optimizations
+- Code readability and maintainability improvements
+
+# Memory System
+
+## Project Directory Structure
+```
+Project Root
+├── docs/
+├── tasks/
+├── .clinerules/rules/
+├── .clinerules/
+├── src/
+├── test/
+├── utils/
+├── config/
+├── data/
+└── Other Directories
+```
+
+## Core Files (Required)
+1. **product_requirement_docs.md**: Project purpose and requirements
+   - Why this project exists
+   - Problems it solves
+   - Core requirements and goals
+
+2. **architecture.md**: System design and component relationships
+   - How it should work
+   - Component relationships
+   - Dependencies
+
+3. **technical.md**: Tech stack and development environment
+   - Technologies used
+   - Development setup
+   - Key technical decisions
+
+4. **tasks_plan.md**: Task backlog and project status
+   - What works
+   - What's left to build
+   - Current status
+   - Known issues
+
+5. **active_context.md**: Current development focus
+   - Current work focus
+   - Active decisions
+   - Recent changes
+   - Next steps
+
+6. **error-documentation.mdc**: Known issues and resolutions
+   - Detailed error documentation
+   - Error handling strategies
+   - Common error codes
+   - Debugging tips
+
+7. **lessons-learned.mdc**: Project patterns and insights
+   - Implementation patterns
+   - User preferences
+   - Project-specific patterns
+   - Technical insights
+   - Best practices
+   - Future considerations
+
+## Context Files (Optional)
+- **docs/literature/**: Research materials
+- **tasks/rfc/**: Detailed task specifications
+- Additional context files as needed
+
+## Workflow Modes
+### PLAN MODE
+1. Read memory files
+2. Create/verify context
+3. Develop and present strategy
+4. Document in memory files after verification
+
+### ACT MODE
+1. Check relevant memory files
+2. Update documentation
+3. Execute task
+4. Document changes in memory files
+
+## Documentation Updates
+- After significant changes
+- When requested with "update memory files"
+- When context needs clarification
+- After plan verification
+- After discovering new project patterns
+
+## Project Intelligence
+- Capture in lessons-learned.mdc:
+  - Implementation patterns
+  - User preferences
+  - Project-specific patterns
+  - Decision evolution
+  - Technical insights
+  - Best practices identified
+  - Future considerations

@@ -1,0 +1,6 @@
+{
+  "device_id": "YOUR_DEVICE_ID",
+  "server": "YOUR_JELLYFIN_SERVER_URL",
+  "token": "YOUR_JELLYFIN_SERVER_TOKEN",
+  "user_id": "YOUR_JELLYFIN_SERVER_USER_ID"
+}
