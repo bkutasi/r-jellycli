@@ -1,0 +1,25 @@
+---
+services:
+  r-jellycli:
+    build: .
+    container_name: r-jellycli
+    # Use host network for best device discovery (optional - try this if external network doesn't work)
+    #network_mode: "host"
+    environment:
+      - JELLYFIN_SERVER_URL=http://jellyfin:8096
+      - JELLYFIN_USERNAME=bkutasi
+      - JELLYFIN_PASSWORD='7FpR>^ceVmM.uFc$$kwAz'
+      - ALSA_DEVICE=Loopback
+      - AUTO_SELECT_OPTION=2  # Enable non-interactive mode, auto-select Music library
+    # No volume mount needed - stateless container
+    devices:
+      - /dev/snd:/dev/snd  # Give access to sound devices
+    # Comment out networks when using host networking mode
+    networks:
+      - media  # Use the same network as Jellyfin
+    restart: unless-stopped
+
+# Comment out networks section when using host networking mode
+# networks:
+#   media:
+#     external: true  # Use the existing media network

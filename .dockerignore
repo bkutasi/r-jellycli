@@ -1,0 +1,21 @@
+# Exclude target directory (build artifacts) 
+target/
+
+# Exclude git directory
+.git/
+
+# Exclude any local credentials
+credentials.json
+
+# Exclude any documentation
+docs/
+
+# Exclude any backup files
+**/*.bak
+**/*.swp
+**/*.tmp
+
+# Exclude other unnecessary files
+Dockerfile
+docker-compose.yml
+.dockerignore
