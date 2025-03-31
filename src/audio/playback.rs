@@ -76,6 +76,12 @@ impl From<reqwest::Error> for AudioError {
     }
 }
 
+impl From<&str> for AudioError {
+    fn from(s: &str) -> Self {
+        AudioError::StreamError(s.to_string())
+    }
+}
+
 /// Manages ALSA audio playback
 pub struct AlsaPlayer {
     device_name: String,

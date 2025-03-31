@@ -36,7 +36,7 @@ pub async fn authenticate(
     headers.insert(
         "X-Emby-Authorization", 
         header::HeaderValue::from_static(
-            "MediaBrowser Client=\"JellyfinCLI\", Device=\"CLI\", DeviceId=\"r-jellycli\", Version=\"0.1.0\", UserId=\"\""
+            "MediaBrowser Client=\"r-jellycli\", Device=\"HeadlessPlayer\", DeviceId=\"r-jellycli\", Version=\"0.1.0\", DeviceName=\"Jellyfin CLI Player\""
         )
     );
     

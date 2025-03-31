@@ -55,22 +55,6 @@
    - Cross-platform compatibility where possible
    - Compatibility with different versions of Jellyfin server
 
-## Future Enhancements (Potential Roadmap)
-
-1. **Video Playback Support**
-   - Basic video playback capabilities through FFMPEG
-   - Video format transcoding support
-
-2. **Enhanced User Interface**
-   - TUI (Text-based User Interface) with panels and navigation
-   - Keyboard shortcuts for common actions
-
-3. **Advanced Features**
-   - Playlist management
-   - Resume playback functionality
-   - User profile switching
-   - Offline mode with downloaded content
-
 ## Constraints
 
 - Must work with minimal dependencies

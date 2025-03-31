@@ -6,11 +6,11 @@ A command-line interface client for Jellyfin media server, written in Rust. This
 
 This project is in **early development**. Current implementation:
 
-- ✅ Authentication with Jellyfin server (both API key and username/password)
-- ✅ Basic media library browsing
-- ✅ Directory navigation
-- ✅ Basic audio playback via ALSA
-- ✅ Configuration persistence (server URL, credentials, etc.)
+- Authentication with Jellyfin server (both API key and username/password)
+- Basic media library browsing
+- Directory navigation
+- Basic audio playback via ALSA
+- Configuration persistence (server URL, credentials, etc.)
 
 ## Features
 
@@ -134,7 +134,10 @@ Once running, you can navigate using these commands:
 
 - Select item: Enter the item number and press Enter
 - Go back: Type `b` or `back` after playback
-- Quit: Type `q` or `quit` after playback
+- Quit: Type `q` or `quit` after playback or at any navigation screen
+- Exit anytime: Press `Ctrl+C` for graceful shutdown
+
+The application now properly handles Ctrl+C interruptions at any point during execution, ensuring a clean shutdown even during media playback or while waiting for user input. This makes it easy to exit the application at any time without leaving orphaned processes or incomplete shutdown procedures.
 
 ## Configuration
 

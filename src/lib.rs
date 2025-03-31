@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod config;
 pub mod jellyfin;
+pub mod player;
 pub mod ui;
 
 /// Initialize the application directories

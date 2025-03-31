@@ -54,48 +54,24 @@
   - Serde requires explicit `#[serde(rename = "...")]` for case-sensitive JSON field mapping.
   - `clap` arguments with `default_value` become `String`, not `Option<String>`, affecting how fallback logic (like for env vars) must be implemented.
 
+4. **Signal Handling in CLI Applications**
+   - Implementing Ctrl+C handling is essential for proper application cleanup
+   - Tokio signal handlers must be properly integrated with the main application flow
+   - Using atomic flags (Arc<AtomicBool>) provides thread-safe communication across tasks
+   - Exit checks must be placed at strategic points in the program flow
+   - Blocking operations need timeout mechanisms to ensure they can be interrupted
 
-## Project Decisions and Evolution
+5. **Clean Exit Strategy**
+   - Proper exit handling requires a multi-layered approach:
+     - Signal capturing (Ctrl+C) for external interruption
+     - Command-based exit for user-initiated termination
+     - Strategic exit checks throughout application flow
+   - All spawned tasks need proper cancellation mechanisms
+   - Resources (files, connections, devices) should have explicit cleanup procedures
+   - WebSocket connections need explicit closure to maintain server session state integrity
+   - Blocking operations should have timeout mechanisms to prevent hanging during exit
 
-### Initial Design Decisions
-
-1. **Language Choice: Rust**
-   - Selected for performance, safety, and modern language features
-   - Strong ecosystem support for required capabilities
-   - Cross-platform potential despite initial Linux focus
-
-2. **ALSA for Audio**
-   - Native Linux solution with good performance
-   - Direct hardware access without intermediate layers
-   - Rust binding library available and actively maintained
-
-3. **Command-Line Interface**
-   - Simplifies initial development
-   - Accessible on headless systems
-   - Fits target user demographic (power users, server administrators)
-
-### Evolved Understanding
-
-1. **Media Streaming Complexity**
-   - Audio formats require specific decoding approaches
-   - Buffer management critical for uninterrupted playback
-   - Network conditions significantly impact streaming performance
-
-2. **User Experience Importance**
-   - Even CLI applications benefit from thoughtful UX design
-   - Clear feedback and status information essential
-   - Progressive disclosure of complexity improves usability
-
-3. **API Compatibility Challenges**
-   - Jellyfin API can vary between server versions
-   - Authentication methods have different security implications
-   - Response formats may require flexible parsing with field aliases
-   - JSON field names may differ in casing between server versions
-   - Empty responses need careful handling to prevent parsing errors
-  - Providing multiple configuration methods (CLI, Env Vars, File) increases flexibility, especially for containerized environments. Clear precedence rules are essential.
-
-
-## User Preferences and Feedback
+## User Experience Insights
 
 1. **Authentication Security**
    - Preference for storing credentials in dedicated files rather than command line
@@ -141,6 +117,45 @@
    - Format-specific fast paths (mono vs multi-channel) can improve audio processing performance
    - Pre-buffering streamed content can prevent interruptions at the cost of latency
    - Processing audio in chunks balances memory use and processing overhead
+
+## Project Decisions and Evolution
+
+### Initial Design Decisions
+
+1. **Language Choice: Rust**
+   - Selected for performance, safety, and modern language features
+   - Strong ecosystem support for required capabilities
+   - Cross-platform potential despite initial Linux focus
+
+2. **ALSA for Audio**
+   - Native Linux solution with good performance
+   - Direct hardware access without intermediate layers
+   - Rust binding library available and actively maintained
+
+3. **Command-Line Interface**
+   - Simplifies initial development
+   - Accessible on headless systems
+   - Fits target user demographic (power users, server administrators)
+
+### Evolved Understanding
+
+1. **Media Streaming Complexity**
+   - Audio formats require specific decoding approaches
+   - Buffer management critical for uninterrupted playback
+   - Network conditions significantly impact streaming performance
+
+2. **User Experience Importance**
+   - Even CLI applications benefit from thoughtful UX design
+   - Clear feedback and status information essential
+   - Progressive disclosure of complexity improves usability
+
+3. **API Compatibility Challenges**
+   - Jellyfin API can vary between server versions
+   - Authentication methods have different security implications
+   - Response formats may require flexible parsing with field aliases
+   - JSON field names may differ in casing between server versions
+   - Empty responses need careful handling to prevent parsing errors
+  - Providing multiple configuration methods (CLI, Env Vars, File) increases flexibility, especially for containerized environments. Clear precedence rules are essential.
 
 ## Future Considerations
 

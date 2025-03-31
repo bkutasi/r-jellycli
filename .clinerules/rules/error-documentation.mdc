@@ -49,7 +49,6 @@
   - Add proper error handling for empty responses
   - Implement test mode to verify authentication separate from other functionality
 
-
 #### Issue: JSON parsing error: missing field `id` when fetching media items
 - **Symptoms**: `Error: InvalidResponse("Failed to parse items response")` with detail `JSON parsing error: missing field 'id' at line X column Y`.
 - **Potential Causes**:
@@ -130,6 +129,32 @@
   - Add fallback handling for unsupported formats (e.g., use silence)
   - Implement specialized fast paths for mono vs. multi-channel audio
 - **Affected Components**: Audio playback format conversion in src/audio/playback.rs
+
+### Application Exit Issues
+
+#### Issue: Application hangs or fails to exit cleanly
+- **Symptoms**: Application doesn't respond to Ctrl+C or quit commands, requiring force termination
+- **Potential Causes**:
+  - Signal handler not properly implemented
+  - Blocking operations preventing signal processing
+  - Tasks not properly cancelled during shutdown
+  - Resources not properly cleaned up during exit
+- **Resolution**:
+  - Implement proper signal handling with tokio::signal::ctrl_c()
+  - Use atomic flags to communicate exit status across tasks
+  - Check for exit conditions at appropriate points in the code
+  - Ensure all async tasks are properly cancelled during shutdown
+  - Add explicit cleanup procedures for all resources
+
+#### Issue: Incomplete playback session termination
+- **Symptoms**: Jellyfin server shows client as still connected after exit
+- **Potential Causes**:
+  - WebSocket connection not properly closed
+  - Session not properly ended with Jellyfin API
+- **Resolution**:
+  - Implement explicit WebSocket closure during shutdown
+  - Add API call to properly terminate session on exit
+  - Implement graceful shutdown procedure for all connections
 
 ### Media Handling Issues
 

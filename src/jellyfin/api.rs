@@ -2,15 +2,24 @@
 
 use reqwest::{Client, Error as ReqwestError};
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool};
+use tokio::sync::Mutex;
 // Removed unused AuthRequest import
 use crate::jellyfin::models::{MediaItem, ItemsResponse, AuthResponse};
+use crate::jellyfin::session::SessionManager;
+use crate::jellyfin::WebSocketHandler;
+use crate::player::Player;
 
 /// Client for interacting with Jellyfin API
+#[derive(Clone)]
 pub struct JellyfinClient {
     client: Client,
     server_url: String,
     api_key: Option<String>,
     user_id: Option<String>,
+    session_manager: Option<SessionManager>,
+    websocket_handler: Option<Arc<Mutex<WebSocketHandler>>>,
 }
 
 /// Error types for Jellyfin API operations
@@ -20,7 +29,7 @@ pub enum JellyfinError {
     Authentication(&'static str),
     NotFound(&'static str),
     InvalidResponse(&'static str),
-    Other(Box<dyn Error>),
+    Other(Box<dyn Error + Send + Sync>),
 }
 
 impl From<ReqwestError> for JellyfinError {
@@ -78,6 +87,8 @@ impl JellyfinClient {
             server_url: normalized_url,
             api_key: None,
             user_id: None,
+            session_manager: None,
+            websocket_handler: None,
         }
     }
 
@@ -106,6 +117,48 @@ impl JellyfinClient {
     /// Get user ID (primarily for testing)
     pub fn get_user_id(&self) -> &Option<String> {
         &self.user_id
+    }
+    
+    /// Initialize the session manager after authentication
+    pub async fn initialize_session(&mut self) -> Result<(), JellyfinError> {
+        println!("[CLIENT-DEBUG] Initializing session...");
+        
+        if let (Some(api_key), Some(user_id)) = (&self.api_key, &self.user_id) {
+            println!("[CLIENT-DEBUG] Creating session manager with user_id: {} and api_key length: {}", user_id, api_key.len());
+            
+            let mut session_manager = SessionManager::new(
+                self.client.clone(),
+                self.server_url.clone(),
+                api_key.clone(),
+                user_id.clone()
+            );
+            
+            // Start session
+            match session_manager.start_session().await {
+                Ok(()) => {
+                    println!("[CLIENT-DEBUG] Session started successfully");
+                    self.session_manager = Some(session_manager);
+                    
+                    // Initialize WebSocket handler
+                    let ws_handler = WebSocketHandler::new(
+                        self.clone(), // Pass the full client
+                        &self.server_url,
+                        &api_key,
+                        "r-jellycli-rust" // Use the consistent device ID
+                    );
+                    self.websocket_handler = Some(Arc::new(Mutex::new(ws_handler)));
+                    
+                    Ok(())
+                },
+                Err(e) => {
+                    println!("[CLIENT-DEBUG] Failed to start session: {:?}", e);
+                    Err(JellyfinError::Network(e))
+                }
+            }
+        } else {
+            println!("[CLIENT-DEBUG] Cannot initialize session - missing authentication data");
+            Err(JellyfinError::Authentication("Cannot initialize session without authentication"))
+        }
     }
     
     /// Authenticate with Jellyfin using username and password
@@ -138,7 +191,12 @@ impl JellyfinClient {
             Err(e) => {
                 // Preserve the original error for better debugging
                 println!("[CLIENT-DEBUG] Authentication error details: {:?}", e);
-                Err(JellyfinError::Other(e))
+                // Create a new wrapper error that implements Send + Sync
+                let err_str = format!("Authentication error: {}", e);
+                Err(JellyfinError::Other(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    err_str
+                ))))
             }
         }
     }
@@ -225,6 +283,50 @@ impl JellyfinClient {
         Ok(response.items)
     }
     
+    /// Get full details for multiple items by their IDs
+    pub async fn get_items_details(&self, item_ids: &[String]) -> Result<Vec<MediaItem>, JellyfinError> {
+        println!("[CLIENT-DEBUG] get_items_details called for {} items", item_ids.len());
+
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let user_id = self.user_id.as_ref().ok_or(JellyfinError::Authentication("User ID not set"))?;
+        let api_key = self.api_key.as_ref().ok_or(JellyfinError::Authentication("API key not set"))?;
+
+        let ids_param = item_ids.join(",");
+        let url = format!(
+            "{}/Users/{}/Items?Ids={}&Fields=MediaSources,Chapters", // Added Fields for necessary data
+            self.server_url,
+            user_id,
+            ids_param
+        );
+
+        println!("[CLIENT-DEBUG] Fetching item details from URL: {}", url);
+
+        let response = self.client
+            .get(&url)
+            .header("X-Emby-Token", api_key)
+            .send()
+            .await
+            .map_err(JellyfinError::Network)?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_else(|_| "Failed to read error body".to_string());
+            println!("[CLIENT-DEBUG] Error fetching item details: Status {}, Body: {}", status, error_text);
+            return Err(JellyfinError::InvalidResponse("Failed to fetch item details"));
+        }
+
+        let items_response: ItemsResponse = response.json().await.map_err(|e| {
+            println!("[CLIENT-DEBUG] Error parsing item details response: {:?}", e);
+            JellyfinError::InvalidResponse("Failed to parse item details response")
+        })?;
+
+        println!("[CLIENT-DEBUG] Successfully fetched details for {} items", items_response.items.len());
+        Ok(items_response.items)
+    }
+    
     /// Get streaming URL for an item
     pub fn get_stream_url(&self, item_id: &str) -> Result<String, JellyfinError> {
         // No need to use user_id for streaming URL
@@ -236,6 +338,137 @@ impl JellyfinClient {
                 Ok(url)
             }
             None => Err(JellyfinError::Authentication("API key not set")),
+        }
+    }
+    
+    /// Report playback progress to Jellyfin server
+    pub async fn report_playback_progress(
+        &self,
+        item_id: &str,
+        position_ticks: i64,
+        is_playing: bool,
+        is_paused: bool
+    ) -> Result<(), JellyfinError> {
+        println!("[CLIENT-DEBUG] Reporting playback progress...");
+        
+        if let Some(session_manager) = &self.session_manager {
+            match session_manager.report_playback_progress(item_id, position_ticks, is_playing, is_paused).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    println!("[CLIENT-DEBUG] Error reporting playback progress: {:?}", e);
+                    Err(JellyfinError::Network(e))
+                }
+            }
+        } else {
+            println!("[CLIENT-DEBUG] Cannot report progress - session manager not initialized");
+            Err(JellyfinError::InvalidResponse("Session manager not initialized"))
+        }
+    }
+    
+    /// Report playback started to Jellyfin server
+    pub async fn report_playback_start(&self, item_id: &str) -> Result<(), JellyfinError> {
+        println!("[CLIENT-DEBUG] Reporting playback start...");
+        
+        if let Some(session_manager) = &self.session_manager {
+            match session_manager.report_playback_start(item_id).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    println!("[CLIENT-DEBUG] Error reporting playback start: {:?}", e);
+                    Err(JellyfinError::Network(e))
+                }
+            }
+        } else {
+            println!("[CLIENT-DEBUG] Cannot report playback start - session manager not initialized");
+            Err(JellyfinError::InvalidResponse("Session manager not initialized"))
+        }
+    }
+    
+    /// Report playback stopped to Jellyfin server
+    pub async fn report_playback_stopped(&self, item_id: &str, position_ticks: i64) -> Result<(), JellyfinError> {
+        println!("[CLIENT-DEBUG] Reporting playback stopped...");
+        
+        if let Some(session_manager) = &self.session_manager {
+            match session_manager.report_playback_stopped(item_id, position_ticks).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    println!("[CLIENT-DEBUG] Error reporting playback stopped: {:?}", e);
+                    Err(JellyfinError::Network(e))
+                }
+            }
+        } else {
+            println!("[CLIENT-DEBUG] Cannot report playback stopped - session manager not initialized");
+            Err(JellyfinError::InvalidResponse("Session manager not initialized"))
+        }
+    }
+
+    /// Connect to the Jellyfin WebSocket for real-time updates and remote control
+    pub async fn connect_websocket(&self) -> Result<(), JellyfinError> {
+        if let Some(websocket_handler) = &self.websocket_handler {
+            let mut handler = websocket_handler.lock().await;
+            match handler.connect().await {
+                Ok(_) => {
+                    println!("[CLIENT-DEBUG] WebSocket connected successfully");
+                    Ok(())
+                },
+                Err(e) => {
+                    println!("[CLIENT-DEBUG] Failed to connect WebSocket: {:?}", e);
+                    Err(JellyfinError::Other(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("WebSocket connection failed: {}", e)
+                    )) as Box<dyn Error + Send + Sync>))
+                }
+            }
+        } else {
+            println!("[CLIENT-DEBUG] Cannot connect WebSocket - handler not initialized");
+            Err(JellyfinError::Authentication("WebSocket handler not initialized"))
+        }
+    }
+    
+    /// Set the player instance for the WebSocket handler to control
+    pub async fn set_player(&self, player: Arc<Mutex<Player>>) -> Result<(), JellyfinError> {
+        if let Some(websocket_handler) = &self.websocket_handler {
+            let mut handler = websocket_handler.lock().await;
+            handler.set_player(player);
+            Ok(())
+        } else {
+            println!("[CLIENT-DEBUG] Cannot set player - WebSocket handler not initialized");
+            Err(JellyfinError::Authentication("WebSocket handler not initialized"))
+        }
+    }
+    
+    /// Start listening for WebSocket commands in a background task
+    pub fn start_websocket_listener(&self, shutdown_signal: Arc<AtomicBool>) -> Result<(), JellyfinError> {
+        if let Some(websocket_handler) = &self.websocket_handler {
+            let ws_handler = websocket_handler.clone();
+            let shutdown = shutdown_signal.clone();
+            
+            // Spawn a background task to listen for WebSocket messages
+            tokio::spawn(async move {
+                println!("[CLIENT-DEBUG] Starting WebSocket listener");
+                
+                // Get a reference to the handler, then drop the mutex guard before awaiting
+                // to prevent the Send issue with MutexGuard across .await points
+                let result = {
+                    let mut handler = ws_handler.lock().await;
+                    // Clone anything from handler we need for the listen_for_commands call
+                    handler.prepare_for_listening(shutdown.clone())
+                };
+                
+                if let Some(mut prepared_handler) = result {
+                    if let Err(e) = prepared_handler.listen_for_commands().await {
+                        println!("[CLIENT-DEBUG] WebSocket listener error: {:?}", e);
+                    }
+                } else {
+                    println!("[CLIENT-DEBUG] Failed to prepare WebSocket handler for listening");
+                }
+                
+                println!("[CLIENT-DEBUG] WebSocket listener stopped");
+            });
+            
+            Ok(())
+        } else {
+            println!("[CLIENT-DEBUG] Cannot start WebSocket listener - handler not initialized");
+            Err(JellyfinError::Authentication("WebSocket handler not initialized"))
         }
     }
 }

@@ -16,6 +16,13 @@
   - Updated error documentation with new troubleshooting tips
   - Added lessons learned about audio format handling
   - Created comprehensive memory of implemented audio playback fixes
+  - Updated README with new clean exit functionality
+
+- ✅ **User Experience Improvements**
+  - Implemented clean exit handling with Ctrl+C support
+  - Added exit functionality at all navigation points
+  - Fixed signal handling to ensure graceful shutdown
+  - Ensured background tasks are properly terminated during exit
 
 - 🚧 **Current Blockers**
   - Client appears as generic "CLI" in other Jellyfin clients instead of a proper named session

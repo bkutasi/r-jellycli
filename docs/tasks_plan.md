@@ -121,6 +121,13 @@
    - Add basic streaming from Jellyfin API (placeholder buffer)
    - Status: Completed
 
+7. **Clean Exit Handling**
+   - Implemented Ctrl+C signal handler for graceful termination
+   - Added exit checks at all navigation points
+   - Ensured proper cleanup of resources during shutdown
+   - Updated documentation with exit functionality
+   - Status: Completed
+
 ## Backlog
 
 1. **Video Playback Support**
