@@ -23,14 +23,13 @@
   - Fixed signal handling to ensure graceful shutdown
   - Ensured background tasks are properly terminated during exit
 
-- ✅ **Jellyfin Remote Control Integration**
-  - Implemented proper client capability reporting format to match Jellyfin API expectations
-  - Updated session management to establish WebSocket connection immediately after capabilities reporting
-  - Added session ID to WebSocket URL for proper remote control association
-  - Implemented session keep-alive pings (every 30 seconds) to maintain session visibility
-  - Fixed error handling and thread safety issues in the implementation
-  - Added `DeviceId` field to `Settings` and ensured it's correctly generated/loaded and used for session reporting.
-  - Improved WebSocket error handling for potentially more graceful closure.
+- ✅ **Jellyfin Remote Control Integration & Stable WebSocket**
+  - Implemented proper client capability reporting format.
+  - Established a stable and persistent WebSocket connection immediately after capabilities reporting, using the correct session ID.
+  - Session keep-alive pings (every 30 seconds) successfully maintain the connection and session visibility.
+  - Resolved previous error handling and thread safety issues related to the WebSocket connection.
+  - Ensured `DeviceId` is correctly generated/loaded and used for session reporting.
+  - The client now reliably appears in Jellyfin's "Play On" menu thanks to the stable connection.
 
 - ✅ **SSDP Discovery Implementation**
   - Added an asynchronous SSDP broadcasting task (`src/ssdp/broadcaster.rs`).
@@ -40,12 +39,10 @@
 
 - ❌ **Failed Simplification Attempt**: Removed SSDP broadcaster, HTTP pings, and refactored session/ID handling to align with `jellycli-repo`. This did *not* resolve the client visibility issue.
 
-- 🚧 **Current Blockers**
-  - Client still does not appear in Jellyfin's "play on" menu, even after the simplification attempt (removing SSDP, aligning session handling).
+- ✅ **Blockers Resolved**
+  - The previous blocker regarding client visibility in the "Play On" menu is resolved due to the stable WebSocket connection.
 
-**Next Steps**: (Reverting to original debugging plan)
-1.  Verify SSDP broadcast content and timing using network analysis tools (e.g., Wireshark).
-2.  Perform deeper debugging of the WebSocket connection lifecycle: Why does it close prematurely? Are keep-alives consistently sent/received? Are incoming messages handled correctly?
-3.  Compare network traffic (SSDP and WebSocket) between `r-jellycli` and `jellycli` to identify subtle differences in protocol implementation.
-4.  Review Jellyfin server logs again with detailed client-side logging enabled (including SSDP and WebSocket traces).
-5.  Consider adding handling for SSDP M-SEARCH requests if broadcasting alone is insufficient.
+**Next Steps**:
+1.  Focus on the next high-priority tasks from `docs/tasks_plan.md`, such as implementing real streaming/decoding or enhancing playback controls.
+2.  Perform thorough testing of remote control commands now that the WebSocket connection is stable.
+3.  Continue refining error handling and documentation based on recent changes.

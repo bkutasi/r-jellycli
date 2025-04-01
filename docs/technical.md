@@ -12,6 +12,7 @@
 - **tokio** (v1.21.2): Asynchronous runtime for Rust, providing async/await functionality
 - **alsa** (v0.6.0): ALSA (Advanced Linux Sound Architecture) bindings for Rust
 - **serde_json** (v1.0): JSON support for serde serialization/deserialization
+- **tokio-tungstenite** (v0.20.1): WebSocket client library for Tokio
 
 ### External Dependencies
 - **ALSA system libraries**: Required for audio playback on Linux systems
@@ -116,7 +117,4 @@
 ### Data Protection
 - No persistent storage of media implemented yet.
 - HTTPS should be used for server communication.
-
-### Data Protection
-- No persistent storage of media or credentials implemented yet
 - HTTPS should be used for server communication

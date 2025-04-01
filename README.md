@@ -11,7 +11,7 @@ This project is in **early development**. Current implementation:
 - Directory navigation
 - Basic audio playback via ALSA
 - Configuration persistence (server URL, credentials, etc.)
-- Session reporting and WebSocket connection for remote control (partially implemented)
+- Stable session reporting and WebSocket connection for remote control
 - SSDP broadcasting for network discovery (initial implementation)
 
 ## Features
@@ -22,7 +22,7 @@ This project is in **early development**. Current implementation:
 - **Audio Playback**: Stream and play audio content using ALSA
 - **Configuration Management**: Save your server URL, credentials, and playback preferences
 - **Network Discovery**: Uses SSDP broadcasting to announce its presence on the network.
-- **Remote Control (WIP)**: Includes session management and WebSocket support intended for remote control via other Jellyfin clients (currently under development and not fully functional).
+- **Remote Control**: Stable session management and WebSocket support enables remote control capabilities via other Jellyfin clients.
 
 ## Requirements
 

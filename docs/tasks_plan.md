@@ -6,7 +6,7 @@
 
 **Project Phase**: Core Functionality Implementation
 
-**Last Updated**: March 25, 2025
+**Last Updated**: April 1, 2025
 
 ## Priority Tasks
 
@@ -127,6 +127,12 @@
    - Ensured proper cleanup of resources during shutdown
    - Updated documentation with exit functionality
    - Status: Completed
+
+8. **WebSocket Connection Stabilization**
+   - Debugged and fixed persistent connection issues.
+   - Established stable WebSocket communication for session reporting and remote control.
+   - Status: Completed
+
 
 ## Backlog
 
