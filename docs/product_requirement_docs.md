@@ -21,20 +21,14 @@
    - Connect to Jellyfin server via URL and API key
    - Support for secure connections (HTTPS)
 
-2. **Media Browsing**
-   - List available media libraries
-   - Browse media items by category
-   - Search media by name, genre, actors, etc.
-   - Sort and filter capabilities
-
 3. **Media Playback**
    - Play audio files through ALSA
    - Support common audio formats (MP3, FLAC, OGG, etc.)
    - Basic playback controls (play, pause, stop, skip)
-   - Volume control
+   - Remote control thought other client with WebSocker ("Play on" on the web interface)
 
-4. **User Experience**
-   - Simple, intuitive command-line interface
+4. **Logging & Others**
+   - Simple, intuitive, informative logs
    - Clear error messages and feedback
    - Configuration file support for persistent settings
 
