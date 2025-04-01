@@ -117,4 +117,3 @@
 ### Data Protection
 - No persistent storage of media implemented yet.
 - HTTPS should be used for server communication.
-- HTTPS should be used for server communication
