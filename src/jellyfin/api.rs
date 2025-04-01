@@ -126,33 +126,61 @@ impl JellyfinClient {
         if let (Some(api_key), Some(user_id)) = (&self.api_key, &self.user_id) {
             println!("[CLIENT-DEBUG] Creating session manager with user_id: {} and api_key length: {}", user_id, api_key.len());
             
-            let mut session_manager = SessionManager::new(
+            let session_manager = SessionManager::new(
                 self.client.clone(),
                 self.server_url.clone(),
                 api_key.clone(),
                 user_id.clone()
             );
             
-            // Start session
-            match session_manager.start_session().await {
+            // Report capabilities to server and get session ID
+            let session_info = match session_manager.report_capabilities().await {
+                Ok(info) => {
+                    println!("[CLIENT-DEBUG] Capabilities reported successfully, session ID: {}", info.session_id);
+                    info
+                },
+                Err(e) => {
+                    return Err(JellyfinError::Other(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to report capabilities: {}", e),
+                    ))));
+                }
+            };
+            
+            // Store session manager for later use
+            self.session_manager = Some(session_manager.clone());
+            
+            // Get device ID for WebSocket connection
+            let device_id = session_manager.get_device_id();
+            
+            // Initialize WebSocket handler with the session ID we just got
+            let mut ws_handler = WebSocketHandler::new(
+                self.clone(),
+                &self.server_url,
+                &api_key,
+                &device_id // Use the consistent device ID
+            )
+            .with_session_id(&session_info.session_id);
+            
+            // Connect to WebSocket immediately after capability reporting
+            // This is critical for the client to appear in the "play on" menu
+            match ws_handler.connect().await {
                 Ok(()) => {
-                    println!("[CLIENT-DEBUG] Session started successfully");
-                    self.session_manager = Some(session_manager);
-                    
-                    // Initialize WebSocket handler
-                    let ws_handler = WebSocketHandler::new(
-                        self.clone(), // Pass the full client
-                        &self.server_url,
-                        &api_key,
-                        "r-jellycli-rust" // Use the consistent device ID
-                    );
+                    println!("[CLIENT-DEBUG] WebSocket connected successfully with session ID: {}", session_info.session_id);
                     self.websocket_handler = Some(Arc::new(Mutex::new(ws_handler)));
+                    
+                    // Now we can start the session keep-alive pings
+                    session_manager.start_keep_alive_pings();
                     
                     Ok(())
                 },
                 Err(e) => {
-                    println!("[CLIENT-DEBUG] Failed to start session: {:?}", e);
-                    Err(JellyfinError::Network(e))
+                    println!("[CLIENT-DEBUG] Failed to connect to WebSocket: {:?}", e);
+                    // Convert the error to string to avoid threading issues
+                    Err(JellyfinError::Other(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("WebSocket connection error: {}", e)
+                    ))))
                 }
             }
         } else {

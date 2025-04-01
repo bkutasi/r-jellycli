@@ -37,6 +37,25 @@ pub struct PlaybackProgressInfo {
     
     #[serde(rename = "AudioStreamIndex")]
     pub audio_stream_index: Option<i32>,
+    
+    // Add additional fields needed for proper remote control visibility
+    #[serde(rename = "CanSeek")]
+    pub can_seek: bool,
+    
+    #[serde(rename = "PlaylistItemId")]
+    pub playlist_item_id: Option<String>,
+    
+    #[serde(rename = "PlaylistIndex")]
+    pub playlist_index: Option<i32>,
+    
+    #[serde(rename = "PlaylistLength")]
+    pub playlist_length: Option<i32>,
+    
+    #[serde(rename = "SubtitleStreamIndex")]
+    pub subtitle_stream_index: Option<i32>,
+    
+    #[serde(rename = "MediaSourceId")]
+    pub media_source_id: Option<String>,
 }
 
 impl PlaybackProgressInfo {
@@ -54,6 +73,12 @@ impl PlaybackProgressInfo {
             is_muted: false,
             volume_level: 100,
             audio_stream_index: Some(0),
+            can_seek: true,
+            playlist_item_id: None,
+            playlist_index: None,
+            playlist_length: None,
+            subtitle_stream_index: None,
+            media_source_id: None,
         }
     }
 }

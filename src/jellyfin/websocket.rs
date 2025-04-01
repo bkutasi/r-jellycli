@@ -55,6 +55,7 @@ pub struct WebSocketHandler {
     server_url: String,
     api_key: String,
     device_id: String,
+    session_id: Option<String>,
     jellyfin_client: JellyfinClient,
     player: Option<Arc<Mutex<Player>>>,
     ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
@@ -66,10 +67,16 @@ impl WebSocketHandler {
             server_url: server_url.to_string(),
             api_key: api_key.to_string(),
             device_id: device_id.to_string(),
+            session_id: None,
             jellyfin_client,
             player: None,
             ws_stream: None,
         }
+    }
+    
+    pub fn with_session_id(mut self, session_id: &str) -> Self {
+        self.session_id = Some(session_id.to_string());
+        self
     }
 
     pub fn set_player(&mut self, player: Arc<Mutex<Player>>) {
@@ -86,12 +93,15 @@ impl WebSocketHandler {
         let port = parsed_url.port().unwrap_or(if scheme == "wss" { 443 } else { 80 });
         let path = parsed_url.path();
 
+        // Build the WebSocket URL - IMPORTANT: Exactly like jellycli
+        // Do NOT include sessionId parameter for initial connection
+        // Format: {scheme}://{host}:{port}{path}socket?api_key={api_key}&deviceId={device_id}
         let ws_url = format!(
             "{}://{}:{}{}socket?api_key={}&deviceId={}",
             scheme, host, port, path, self.api_key, self.device_id
         );
 
-        debug!("Connecting to WebSocket: {}", ws_url);
+        debug!("Connecting to WebSocket using jellycli-compatible format: {}", ws_url);
 
         let url = Url::parse(&ws_url)?;
         let (ws_stream, _) = connect_async(url).await?;
