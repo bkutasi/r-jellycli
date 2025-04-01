@@ -4,8 +4,11 @@ use reqwest::Client;
 use std::env;
 use std::error::Error;
 use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::sleep;
 
+use uuid::Uuid;
 use r_jellycli::jellyfin::{JellyfinClient, authenticate};
 
 #[tokio::main]
@@ -49,7 +52,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_api_key(&auth_response.access_token)
         .with_user_id(&auth_response.user.id);
 
-    match jellyfin_client.initialize_session().await {
+    let test_device_id = Uuid::new_v4().to_string(); // Generate a dummy ID for the test
+    println!("[TEST] Using dummy Device ID: {}", test_device_id);
+    let shutdown_signal = Arc::new(AtomicBool::new(false)); // Create shutdown signal for the test
+    match jellyfin_client.initialize_session(&test_device_id, shutdown_signal.clone()).await {
         Ok(()) => {
             println!("[TEST] Session initialized successfully!");
         }

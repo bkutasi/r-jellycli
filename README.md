@@ -11,6 +11,8 @@ This project is in **early development**. Current implementation:
 - Directory navigation
 - Basic audio playback via ALSA
 - Configuration persistence (server URL, credentials, etc.)
+- Session reporting and WebSocket connection for remote control (partially implemented)
+- SSDP broadcasting for network discovery (initial implementation)
 
 ## Features
 
@@ -19,6 +21,8 @@ This project is in **early development**. Current implementation:
 - **Library Browsing**: Browse your Jellyfin media libraries, folders, and collections
 - **Audio Playback**: Stream and play audio content using ALSA
 - **Configuration Management**: Save your server URL, credentials, and playback preferences
+- **Network Discovery**: Uses SSDP broadcasting to announce its presence on the network.
+- **Remote Control (WIP)**: Includes session management and WebSocket support intended for remote control via other Jellyfin clients (currently under development and not fully functional).
 
 ## Requirements
 
@@ -146,6 +150,7 @@ The application stores configuration in `~/.config/jellycli/config.json` which c
 - Server URL
 - API key (if used)
 - User ID
+- Device ID (auto-generated if missing)
 - ALSA device settings
 
 You can specify a custom configuration path with the `--config` option.
@@ -230,5 +235,5 @@ These manual tests require a valid `credentials.json` file in the project root w
 Planned features:
 
 - Improved error handling
-- Remote client interaction
+- Fully functional remote client interaction ("Play On" visibility and command handling)
 - Better logging

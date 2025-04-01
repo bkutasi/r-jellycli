@@ -3,13 +3,16 @@
 use reqwest::{Client, Error as ReqwestError};
 use std::error::Error;
 use std::sync::Arc;
+use uuid::Uuid;
 use std::sync::atomic::{AtomicBool};
-use tokio::sync::Mutex;
+// Removed unused tokio::sync::Mutex import
 // Removed unused AuthRequest import
 use crate::jellyfin::models::{MediaItem, ItemsResponse, AuthResponse};
 use crate::jellyfin::session::SessionManager;
 use crate::jellyfin::WebSocketHandler;
 use crate::player::Player;
+use tokio::sync::Mutex; // Use tokio's Mutex
+// Removed duplicate import: use crate::player::Player;
 
 /// Client for interacting with Jellyfin API
 #[derive(Clone)]
@@ -20,6 +23,8 @@ pub struct JellyfinClient {
     user_id: Option<String>,
     session_manager: Option<SessionManager>,
     websocket_handler: Option<Arc<Mutex<WebSocketHandler>>>,
+    websocket_listener_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>, // Use tokio::sync::Mutex
+    play_session_id: String, // Added for persistent playback session ID
 }
 
 /// Error types for Jellyfin API operations
@@ -82,6 +87,10 @@ impl JellyfinClient {
         let normalized_url = server_url.trim_end_matches('/').to_string();
         println!("[CLIENT-DEBUG] Normalized server URL: {}", normalized_url);
         
+        // Generate a persistent PlaySessionId for this client instance
+        let play_session_id = Uuid::new_v4().to_string();
+        println!("[CLIENT-DEBUG] Generated PlaySessionId: {}", play_session_id);
+
         JellyfinClient {
             client,
             server_url: normalized_url,
@@ -89,6 +98,8 @@ impl JellyfinClient {
             user_id: None,
             session_manager: None,
             websocket_handler: None,
+            websocket_listener_handle: Arc::new(Mutex::new(None)), // Initialize with Arc<tokio::sync::Mutex<None>>
+            play_session_id, // Store the generated ID
         }
     }
 
@@ -119,64 +130,104 @@ impl JellyfinClient {
         &self.user_id
     }
     
-    /// Initialize the session manager after authentication
-    pub async fn initialize_session(&mut self) -> Result<(), JellyfinError> {
+    /// Initialize the session manager and report capabilities after authentication.
+    /// This also establishes the WebSocket connection and starts the listener task.
+    pub async fn initialize_session(&mut self, device_id: &str, shutdown_signal: Arc<AtomicBool>) -> Result<(), JellyfinError> {
         println!("[CLIENT-DEBUG] Initializing session...");
-        
+
         if let (Some(api_key), Some(user_id)) = (&self.api_key, &self.user_id) {
-            println!("[CLIENT-DEBUG] Creating session manager with user_id: {} and api_key length: {}", user_id, api_key.len());
-            
+            println!("[CLIENT-DEBUG] Creating session manager with user_id: {}, api_key length: {}, play_session_id: {}", user_id, api_key.len(), self.play_session_id);
+
+            // Create the SessionManager, passing the generated play_session_id
             let session_manager = SessionManager::new(
                 self.client.clone(),
                 self.server_url.clone(),
                 api_key.clone(),
-                user_id.clone()
+                user_id.clone(),
+                device_id.to_string(), // Pass the device_id from settings
+                self.play_session_id.clone() // Pass the generated PlaySessionId
             );
-            
-            // Report capabilities to server and get session ID
-            let session_info = match session_manager.report_capabilities().await {
-                Ok(info) => {
-                    println!("[CLIENT-DEBUG] Capabilities reported successfully, session ID: {}", info.session_id);
-                    info
+
+            // Report capabilities to the server. This should return Ok(()) on success (204 No Content).
+            match session_manager.report_capabilities().await {
+                Ok(()) => {
+                    println!("[CLIENT-DEBUG] Capabilities reported successfully.");
                 },
                 Err(e) => {
-                    return Err(JellyfinError::Other(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to report capabilities: {}", e),
-                    ))));
+                    // Log the specific error from report_capabilities
+                    println!("[CLIENT-DEBUG] Failed to report capabilities: {:?}", e);
+                    // Return a more specific error if possible, otherwise wrap it
+                     return Err(JellyfinError::Other(Box::new(std::io::Error::new(
+                         std::io::ErrorKind::Other,
+                         format!("Failed to report capabilities: {}", e),
+                     ))));
                 }
             };
-            
-            // Store session manager for later use
+
+            // Store session manager for later use (e.g., playback reporting)
             self.session_manager = Some(session_manager.clone());
-            
-            // Get device ID for WebSocket connection
-            let device_id = session_manager.get_device_id();
-            
-            // Initialize WebSocket handler with the session ID we just got
+
+            // Initialize WebSocket handler using the persistent DeviceId
+            // The PlaySessionId is not needed for the WebSocket connection URL itself.
             let mut ws_handler = WebSocketHandler::new(
                 self.clone(),
                 &self.server_url,
-                &api_key,
-                &device_id // Use the consistent device ID
-            )
-            .with_session_id(&session_info.session_id);
-            
+                api_key,
+                device_id // Use the persistent device ID from settings
+            );
+            // Removed .with_session_id() call as it's no longer needed/valid
+
             // Connect to WebSocket immediately after capability reporting
-            // This is critical for the client to appear in the "play on" menu
             match ws_handler.connect().await {
                 Ok(()) => {
-                    println!("[CLIENT-DEBUG] WebSocket connected successfully with session ID: {}", session_info.session_id);
-                    self.websocket_handler = Some(Arc::new(Mutex::new(ws_handler)));
-                    
-                    // Now we can start the session keep-alive pings
-                    session_manager.start_keep_alive_pings();
-                    
+                    println!("[CLIENT-DEBUG] WebSocket connected successfully using DeviceId: {}", device_id);
+                    let ws_handler_arc = Arc::new(Mutex::new(ws_handler));
+                    self.websocket_handler = Some(ws_handler_arc.clone());
+
+                    // --- Start WebSocket listener task immediately ---
+                    let shutdown = shutdown_signal.clone();
+                    // Clone the Arc again specifically for the task's move
+                    let task_ws_handler_arc = ws_handler_arc.clone();
+                    log::debug!("[WS Spawn] Attempting to spawn original listener task..."); // Log before spawn
+                    let handle = tokio::spawn(async move {
+                        log::trace!("[WS Listen] Original listener task started execution."); // Restore original log
+                        let prepared_result = {
+                            // Use the cloned Arc inside the task
+                            let mut handler_guard = task_ws_handler_arc.lock().await;
+                            // Ensure prepare_for_listening is called correctly
+                            handler_guard.prepare_for_listening(shutdown.clone())
+                        }; // MutexGuard dropped here
+
+                        // --- Restore the missing task body ---
+                        if let Some(mut prepared_handler) = prepared_result {
+                            log::debug!("[WS Listen] Prepared handler obtained, starting listen_for_commands loop...");
+                            if let Err(e) = prepared_handler.listen_for_commands().await {
+                                log::error!("[WS Listen] Listener loop exited with error: {:?}", e);
+                            } else {
+                                log::debug!("[WS Listen] Listener loop exited gracefully.");
+                            }
+                        } else {
+                            log::error!("[WS Listen] Failed to obtain prepared handler for WebSocket listener.");
+                        }
+                        log::debug!("[WS Listen] Listener task finished execution.");
+                        // --- End of restored body ---
+                    });
+
+                    // Store the handle
+                    let mut handle_guard = self.websocket_listener_handle.lock().await;
+                    *handle_guard = Some(handle);
+                    // --- End WebSocket listener task start ---
+
+
+                    // HTTP Keep-alive pings are removed (Step 4), rely on WebSocket pings.
+                    // session_manager.start_keep_alive_pings(); // Removed
+
                     Ok(())
                 },
                 Err(e) => {
                     println!("[CLIENT-DEBUG] Failed to connect to WebSocket: {:?}", e);
-                    // Convert the error to string to avoid threading issues
+                    // Ensure websocket_handler is None if connection fails
+                    self.websocket_handler = None;
                     Err(JellyfinError::Other(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("WebSocket connection error: {}", e)
@@ -184,7 +235,7 @@ impl JellyfinClient {
                 }
             }
         } else {
-            println!("[CLIENT-DEBUG] Cannot initialize session - missing authentication data");
+            println!("[CLIENT-DEBUG] Cannot initialize session - missing authentication data (API Key or User ID)");
             Err(JellyfinError::Authentication("Cannot initialize session without authentication"))
         }
     }
@@ -432,7 +483,7 @@ impl JellyfinClient {
     /// Connect to the Jellyfin WebSocket for real-time updates and remote control
     pub async fn connect_websocket(&self) -> Result<(), JellyfinError> {
         if let Some(websocket_handler) = &self.websocket_handler {
-            let mut handler = websocket_handler.lock().await;
+            let mut handler = websocket_handler.lock().await; // Use tokio::sync::Mutex::lock (async)
             match handler.connect().await {
                 Ok(_) => {
                     println!("[CLIENT-DEBUG] WebSocket connected successfully");
@@ -453,9 +504,9 @@ impl JellyfinClient {
     }
     
     /// Set the player instance for the WebSocket handler to control
-    pub async fn set_player(&self, player: Arc<Mutex<Player>>) -> Result<(), JellyfinError> {
+    pub async fn set_player(&self, player: Arc<tokio::sync::Mutex<Player>>) -> Result<(), JellyfinError> { // Expect tokio::sync::Mutex
         if let Some(websocket_handler) = &self.websocket_handler {
-            let mut handler = websocket_handler.lock().await;
+            let mut handler = websocket_handler.lock().await; // Use tokio::sync::Mutex::lock (async)
             handler.set_player(player);
             Ok(())
         } else {
@@ -464,39 +515,56 @@ impl JellyfinClient {
         }
     }
     
-    /// Start listening for WebSocket commands in a background task
-    pub fn start_websocket_listener(&self, shutdown_signal: Arc<AtomicBool>) -> Result<(), JellyfinError> {
+    /// Start listening for WebSocket commands in a background task and store the handle
+    pub fn start_websocket_listener(&mut self, shutdown_signal: Arc<AtomicBool>) -> Result<(), JellyfinError> {
         if let Some(websocket_handler) = &self.websocket_handler {
             let ws_handler = websocket_handler.clone();
             let shutdown = shutdown_signal.clone();
             
             // Spawn a background task to listen for WebSocket messages
-            tokio::spawn(async move {
-                println!("[CLIENT-DEBUG] Starting WebSocket listener");
-                
+            let handle = tokio::spawn(async move {
+                println!("[CLIENT-DEBUG] Starting WebSocket listener task...");
+
                 // Get a reference to the handler, then drop the mutex guard before awaiting
                 // to prevent the Send issue with MutexGuard across .await points
-                let result = {
-                    let mut handler = ws_handler.lock().await;
-                    // Clone anything from handler we need for the listen_for_commands call
-                    handler.prepare_for_listening(shutdown.clone())
-                };
-                
-                if let Some(mut prepared_handler) = result {
+                let prepared_result = {
+                    let mut handler_guard = ws_handler.lock().await; // Use tokio::sync::Mutex::lock (async)
+                    // Prepare the handler for listening outside the lock if possible
+                    handler_guard.prepare_for_listening(shutdown.clone())
+                }; // MutexGuard dropped here
+
+                if let Some(mut prepared_handler) = prepared_result {
+                    println!("[CLIENT-DEBUG] Prepared handler obtained, starting listen_for_commands loop...");
                     if let Err(e) = prepared_handler.listen_for_commands().await {
-                        println!("[CLIENT-DEBUG] WebSocket listener error: {:?}", e);
+                        // Log errors from the listener loop itself
+                        println!("[CLIENT-DEBUG] WebSocket listener loop exited with error: {:?}", e);
+                    } else {
+                        println!("[CLIENT-DEBUG] WebSocket listener loop exited gracefully.");
                     }
                 } else {
-                    println!("[CLIENT-DEBUG] Failed to prepare WebSocket handler for listening");
+                    // This case implies ws_stream was None when prepare_for_listening was called
+                    println!("[CLIENT-DEBUG] Failed to prepare WebSocket handler for listening (was it connected?).");
                 }
-                
-                println!("[CLIENT-DEBUG] WebSocket listener stopped");
+                println!("[CLIENT-DEBUG] WebSocket listener task finished execution.");
             });
-            
+
+            // Store the handle inside the Arc<Mutex<Option<...>>>
+            // Lock synchronously from this non-async function
+            let mut handle_guard = self.websocket_listener_handle.blocking_lock();
+            *handle_guard = Some(handle);
             Ok(())
         } else {
             println!("[CLIENT-DEBUG] Cannot start WebSocket listener - handler not initialized");
             Err(JellyfinError::Authentication("WebSocket handler not initialized"))
         }
+    }
+
+    /// Take the JoinHandle for the WebSocket listener task, if it exists.
+    /// This allows the caller to await the task's completion during shutdown.
+    /// Takes the websocket listener handle out of the shared state, if present.
+    pub async fn take_websocket_handle(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        // Lock the mutex asynchronously and take the handle from the Option inside
+        let mut handle_guard = self.websocket_listener_handle.lock().await;
+        handle_guard.take()
     }
 }

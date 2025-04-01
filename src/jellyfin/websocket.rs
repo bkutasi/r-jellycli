@@ -107,7 +107,21 @@ impl WebSocketHandler {
         let (ws_stream, _) = connect_async(url).await?;
 
         info!("WebSocket connected");
-        self.ws_stream = Some(ws_stream);
+        debug!("WebSocket connection established successfully.");
+        // Store the stream temporarily to send the initial message
+        let mut temp_ws_stream = ws_stream;
+
+        // Send initial KeepAlive message immediately after connecting
+        // Jellyfin expects this to keep the connection registered properly
+        let keep_alive_msg = r#"{"MessageType": "KeepAlive"}"#;
+        debug!("Sending initial KeepAlive message: {}", keep_alive_msg);
+        if let Err(e) = temp_ws_stream.send(Message::Text(keep_alive_msg.to_string())).await {
+            error!("Failed to send initial KeepAlive message: {}", e);
+            // Return error if the initial message fails, as the connection is likely unusable
+            return Err(Box::new(e));
+        }
+        debug!("Initial KeepAlive message sent successfully.");
+        self.ws_stream = Some(temp_ws_stream); // Store the stream after sending the message
 
         Ok(())
     }
@@ -142,24 +156,42 @@ pub struct PreparedWebSocketHandler {
 impl PreparedWebSocketHandler {
     /// Listen for commands from the Jellyfin server
     pub async fn listen_for_commands(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        log::trace!("[WS Listen] Entered listen_for_commands");
+        debug!("[WS Listen] Entering listen_for_commands function.");
         let player = self.player.clone();
+        debug!("[WS Listen] Player cloned: {}", if player.is_some() { "Some" } else { "None" });
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         
+        debug!("[WS Listen] Ping interval created.");
         debug!("Starting WebSocket listening loop with ping every 30s");
         
         // Process incoming messages
+        debug!("[WS Listen] Entering main loop..."); // Added log
         loop {
             // Check for shutdown signal before processing any messages
-            if self.shutdown_signal.load(Ordering::SeqCst) {
-                debug!("WebSocket listener received shutdown signal, exiting...");
+            let shutdown_state = self.shutdown_signal.load(Ordering::SeqCst); // Read the value
+            debug!("[WS Listen] Checking shutdown signal at loop start. Value: {}", !shutdown_state); // Log the INVERTED value for clarity in this message
+            if !shutdown_state { // Check 1 - Corrected: Exit if signal is FALSE
+                debug!("[WS Listen] Shutdown signal is FALSE at loop start. Exiting."); // Corrected log
+                debug!("WebSocket listener received shutdown signal, sending Close frame and exiting...");
+                // Attempt to send a close frame gracefully
+                if let Err(e) = self.websocket.send(Message::Close(None)).await {
+                    warn!("Failed to send WebSocket close frame during shutdown: {}", e);
+                }
+                // Even if sending close fails, break the loop to terminate the task
                 break;
             }
             
+            debug!("[WS Listen] Entering select! statement..."); // Added log
             tokio::select! {
-                Some(message) = self.websocket.next() => {
-                    match message {
-                        Ok(msg) => {
+                // Branch 1: Message received or stream ended
+                maybe_message = self.websocket.next() => { // Renamed to maybe_message for clarity
+                    debug!("[WS Listen] select! resolved: websocket.next() completed."); // Added log
+                    match maybe_message {
+                        Some(Ok(msg)) => { // Message received successfully
+                            // Existing logic for handling Ok(msg)
                             if let Message::Text(text) = msg {
+                                debug!("[WS] Received Text message.");
                                 debug!("Received WebSocket message: {}", text);
 
                                 // Parse the message
@@ -169,37 +201,60 @@ impl PreparedWebSocketHandler {
                                     warn!("Failed to parse WebSocket message: {}", text);
                                 }
                             } else if let Message::Ping(data) = msg {
+                                debug!("[WS] Received Ping, sending Pong...");
                                 if let Err(e) = self.websocket.send(Message::Pong(data)).await {
                                     error!("Failed to send pong: {}", e);
+                                } else { // Corrected log placement
+                                    debug!("[WS] Pong sent successfully.");
                                 }
                             } else if msg.is_close() {
+                                debug!("[WS Listen] Received Close frame from server. Exiting loop."); // Added log
                                 debug!("Received close frame");
-                                break;
+                                debug!("[WS] Received Close frame.");
+                                break; // Exit loop on Close frame
+                            } else {
+                                debug!("[WS] Received other message type: {:?}", msg); // Log other types
                             }
                         },
-                        Err(e) => {
-                            error!("WebSocket error: {}", e);
-                            return Err(format!("WebSocket error: {}", e).into());
+                        Some(Err(e)) => { // Error reading from WebSocket
+                            debug!("[WS Listen] WebSocket read error occurred: {}. Returning Err.", e); // Added log
+                            error!("WebSocket read error: {}. Attempting graceful close.", e);
+                            let _ = self.websocket.close(None).await;
+                            return Err(format!("WebSocket read error: {}", e).into()); // Exit function with error
+                        },
+                        None => { // Stream ended gracefully (server closed connection without Close frame?)
+                            debug!("[WS Listen] WebSocket stream ended (returned None). Exiting loop."); // Added log
+                            break; // Exit loop if stream ends
                         }
                     }
                 },
+                // Branch 2: Ping interval ticked
                 _ = ping_interval.tick() => {
+                    debug!("[WS Listen] select! resolved: ping_interval.tick() completed."); // Added log
                     // Check for shutdown signal before sending ping
-                    if self.shutdown_signal.load(Ordering::SeqCst) {
-                        debug!("WebSocket ping interval received shutdown signal, exiting...");
-                        break;
+                    // Corrected check: Exit if signal is FALSE
+                    if !self.shutdown_signal.load(Ordering::SeqCst) { // Check 2 - Corrected
+                        debug!("[WS Listen] Shutdown signal is FALSE before sending ping. Exiting loop."); // Corrected log
+                        break; // Exit loop
                     }
-                    
+
                     debug!("Sending ping to keep WebSocket alive");
+                    debug!("[WS] Sending periodic Ping...");
                     if let Err(e) = self.websocket.send(Message::Ping(vec![])).await {
-                        error!("Failed to send ping: {}", e);
-                        return Err(format!("Failed to send ping: {}", e).into());
+                        error!("Failed to send ping: {}. Attempting graceful close.", e);
+                        debug!("[WS Listen] Failed to send ping: {}. Returning Err.", e); // Added log
+                        let _ = self.websocket.close(None).await;
+                        return Err(format!("Failed to send ping: {}", e).into()); // Exit function with error
+                    } else { // Added else block for successful ping log
+                         debug!("[WS] Ping sent successfully.");
                     }
                 }
             }
+            debug!("[WS Listen] Reached end of loop iteration."); // Added log
         }
-        
+
         debug!("WebSocket listener exiting...");
+        debug!("[WS] Exiting listening loop.");
         Ok(())
     }
 
@@ -388,3 +443,4 @@ impl PreparedWebSocketHandler {
         }
     }
 }
+

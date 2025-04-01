@@ -12,6 +12,7 @@ use std::error::Error;
 use std::ffi::CString;
 use std::io;
 use std::sync::Arc;
+use std::sync::Mutex;
 use symphonia::core::audio::SignalSpec;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
@@ -194,11 +195,12 @@ impl AlsaPlayer {
         }
     }
 
-    /// Stream audio from a URL, decode, play, and show progress
+    /// Stream audio from a URL, decode, play, and show progress, allowing for cancellation.
     pub async fn stream_decode_and_play(
         &mut self,
         url: &str,
         total_duration_ticks: Option<i64>,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>, // Add shutdown receiver
     ) -> Result<(), AudioError> {
         println!("[AUDIO-DEBUG] Starting stream_decode_and_play for URL: {}", url);
 
@@ -218,12 +220,16 @@ impl AlsaPlayer {
         let probed = symphonia::default::get_probe()
             .format(&hint, mss, &fmt_opts, &meta_opts)?;
 
-        let mut format_reader = probed.format;
+        let format_reader = Arc::new(Mutex::new(probed.format)); // Wrap in Arc<Mutex<>>
 
+        // Lock the reader to find the track
         let track = format_reader
+            .lock()
+            .expect("Audio reader mutex poisoned during track finding")
             .tracks()
             .iter()
             .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+            .cloned() // Clone the track data as the lock guard is temporary
             .ok_or(AudioError::UnsupportedFormat("No suitable audio track found"))?;
 
         let track_id = track.id;
@@ -270,8 +276,48 @@ impl AlsaPlayer {
         #[allow(unused_assignments)]
         let mut current_time_seconds = 0.0;
 
-        loop {
-            match format_reader.next_packet() {
+        'decode_loop: loop {
+            // Select between getting the next packet and receiving a shutdown signal
+            let next_packet_result = tokio::select! {
+                biased; // Prioritize shutdown check slightly
+
+                // Branch 1: Shutdown signal received
+                _ = shutdown_rx.recv() => {
+                    println!("[AUDIO-DEBUG] Shutdown signal received during packet reading.");
+                    Err(SymphoniaError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "Playback cancelled by shutdown signal",
+                    )))
+                }
+
+                // Branch 2: Get the next packet using spawn_blocking
+                // Assuming format_reader is Arc<Mutex<Box<dyn FormatReader>>> or similar Send + Sync type
+                maybe_packet_res = {
+                    // Clone the Arc to move into the blocking task
+                    let reader_clone = Arc::clone(&format_reader);
+                    tokio::task::spawn_blocking(move || {
+                        // Lock the mutex inside the blocking task
+                        let mut reader_guard = reader_clone.lock().expect("Audio reader mutex poisoned");
+                        reader_guard.next_packet() // Call next_packet on the guard
+                    })
+                } => { // Await the JoinHandle from spawn_blocking here
+                    match maybe_packet_res {
+                        // spawn_blocking finished successfully, returning the Result from next_packet()
+                        Ok(Ok(packet)) => Ok(packet), // Inner Ok: next_packet succeeded
+                        Ok(Err(symphonia_err)) => Err(symphonia_err), // Inner Err: next_packet failed
+                        // spawn_blocking task failed (e.g., panicked or cancelled)
+                        Err(join_error) => {
+                            eprintln!("[AUDIO-ERROR] Spawn blocking task for next_packet failed: {}", join_error);
+                            Err(SymphoniaError::IoError(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("Spawn blocking task failed: {}", join_error),
+                            )))
+                        }
+                    }
+                }
+            };
+
+            match next_packet_result {
                 Ok(packet) => {
                     if packet.track_id() != track_id { continue; }
 
@@ -462,15 +508,26 @@ impl AlsaPlayer {
                 Err(SymphoniaError::IoError(ref err)) if err.kind() == io::ErrorKind::UnexpectedEof => {
                     println!("[AUDIO-DEBUG] End of stream reached.");
                     pb.finish_with_message("Playback finished");
-                    break;
+                    break 'decode_loop;
                 }
                 Err(SymphoniaError::ResetRequired) => {
                     println!("[AUDIO-WARN] Symphonia decoder reset required (unhandled).");
                     pb.abandon_with_message("Stream discontinuity (ResetRequired)");
-                    break;
+                    break 'decode_loop;
                 }
                 Err(e) => {
                     println!("[AUDIO-ERROR] Error reading packet: {}", e);
+                    // Check if it was our cancellation signal disguised as an IoError
+                    if let SymphoniaError::IoError(ref io_err) = e {
+                        if io_err.kind() == std::io::ErrorKind::Interrupted && io_err.to_string().contains("Playback cancelled") {
+                             println!("[AUDIO-DEBUG] Confirmed playback cancellation.");
+                             pb.abandon_with_message("Playback cancelled");
+                             // Return Ok here, as cancellation isn't a "failure" in the traditional sense
+                             // Or return a specific cancellation error if needed upstream
+                             return Err(AudioError::StreamError("Playback cancelled".to_string()));
+                        }
+                    }
+                    // Otherwise, it's a real error
                     pb.abandon_with_message(format!("Stream Read Error: {}", e));
                     return Err(e.into());
                 }

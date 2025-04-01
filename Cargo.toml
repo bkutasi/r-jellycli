@@ -23,6 +23,7 @@ tokio-tungstenite = "0.20.1"
 url = "2.4.1"
 log = "0.4.20"
 hostname = "0.3.1"
+env_logger = "0.10" # Added for logging initialization
 
 [dev-dependencies]
 tempfile = "3.10.1"

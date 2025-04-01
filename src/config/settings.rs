@@ -23,6 +23,9 @@ pub struct Settings {
     /// User ID for Jellyfin requests
     #[serde(default)]
     pub user_id: Option<String>,
+    /// Unique Device ID for this client instance (used for session identification)
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 fn default_alsa_device() -> String {
@@ -70,6 +73,7 @@ impl Settings {
             username: None,
             alsa_device: default_alsa_device(),
             user_id: None,
+            device_id: None, // Initialize device_id as None
         }
     }
 
