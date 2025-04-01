@@ -1,4 +1,4 @@
-use r_jellycli::audio::AlsaPlayer;
+use r_jellycli::audio::PlaybackOrchestrator; // Renamed from AlsaPlayer
 use log::error;
 use env_logger;
 use r_jellycli::config::Settings;
@@ -166,9 +166,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 // --- Create Core Components ---
 
-// Create AlsaPlayer instance (needs device name from settings)
-let alsa_player = Arc::new(Mutex::new(AlsaPlayer::new(&settings.alsa_device)));
-info!("Created AlsaPlayer for device: {}", settings.alsa_device);
+// Create PlaybackOrchestrator instance (needs device name from settings)
+let playback_orchestrator = Arc::new(Mutex::new(PlaybackOrchestrator::new(&settings.alsa_device)));
+info!("Created PlaybackOrchestrator for device: {}", settings.alsa_device);
 
 // Create the central Player state manager
 let player = Arc::new(Mutex::new(Player::new()));
@@ -225,8 +225,9 @@ let mut jellyfin = JellyfinClient::new(&settings.server_url);
     { // Scope for player lock
         let mut player_guard = player.lock().await;
         player_guard.set_jellyfin_client(jellyfin.clone()); // Give Player access to the client
-        player_guard.set_alsa_player(alsa_player.clone()); // Give Player access to the audio player
-        info!("Configured Player instance with JellyfinClient and AlsaPlayer.");
+        // Use the existing method name, which now accepts Arc<Mutex<PlaybackOrchestrator>>
+        player_guard.set_alsa_player(playback_orchestrator.clone()); // Give Player access to the audio player
+        info!("Configured Player instance with JellyfinClient and PlaybackOrchestrator.");
     }
 
 

@@ -49,6 +49,13 @@
   - Refactored `Player` to manage background tasks for playback and progress reporting.
   - Code compiles, but requires testing to confirm UI visibility and control in Jellyfin Web UI.
 
+
+- ✅ **Core Component Refactoring**
+  - Refactored `src/jellyfin/websocket.rs`: Extracted incoming message handling to `src/jellyfin/ws_incoming_handler.rs` for better separation of concerns.
+  - Refactored `src/jellyfin/api.rs`: Improved internal structure with helper functions for modularity and logging.
+  - Refactored `src/audio/playback.rs`: Decomposed into smaller, focused modules within `src/audio/` (`decoder.rs`, `alsa_handler.rs`, `stream_wrapper.rs`, `format_converter.rs`, `progress.rs`, `error.rs`) to enhance maintainability and clarity. The main `playback.rs` now orchestrates these components.
+  - **Goal**: Improve modularity, maintainability, testability, and logging across core components.
+  - **Outcome**: Cleaner code structure, better separation of responsibilities, new files created as listed above.
 **Next Steps**:
 1.  **Test State Reporting**: Verify that the client's playback state (start, stop, progress) is correctly reflected in the Jellyfin Web UI and that basic remote control commands (like stop) work.
 2.  **Implement Remaining Playback Controls**: Add ALSA-level implementation for pause, seek, and volume control, and integrate them with the `Player` and WebSocket communication.

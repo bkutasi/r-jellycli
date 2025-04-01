@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex as StdMutex}; // Use StdMutex for shared progress
 use std::time::Duration as StdDuration;
 use tokio::sync::{mpsc, Mutex, broadcast}; // Added broadcast for shutdown
 use tokio::task::JoinHandle;
-use crate::audio::{AlsaPlayer, PlaybackProgressInfo}; // Import progress info
+use crate::audio::{PlaybackOrchestrator, PlaybackProgressInfo}; // Renamed AlsaPlayer
 use crate::jellyfin::api::JellyfinClient; // Need client for stream URL
 use crate::jellyfin::models::MediaItem;
 use crate::jellyfin::websocket::PlayerStateUpdate;
@@ -10,7 +10,7 @@ use log::{debug, error, info, warn};
 
 // Player struct wraps the audio player and adds remote control capabilities
 pub struct Player {
-    alsa_player: Option<Arc<Mutex<AlsaPlayer>>>,
+    alsa_player: Option<Arc<Mutex<PlaybackOrchestrator>>>, // Renamed from AlsaPlayer
     current_item_id: Option<String>,
     position_ticks: i64,
     is_paused: bool,
@@ -63,7 +63,7 @@ impl Player {
     }
 
     // Keep set_alsa_player if needed for pre-creation, or remove if created on play
-    pub fn set_alsa_player(&mut self, alsa_player: Arc<Mutex<AlsaPlayer>>) {
+    pub fn set_alsa_player(&mut self, alsa_player: Arc<Mutex<PlaybackOrchestrator>>) { // Renamed from AlsaPlayer
         info!("[PLAYER] ALSA player instance set.");
         self.alsa_player = Some(alsa_player);
     }
@@ -245,6 +245,11 @@ impl Player {
             // Pass the receiver for this specific reporter
             let mut reporter_shutdown_rx_clone = reporter_shutdown_rx; // Clone receiver for the task
 
+            // Read current state *before* spawning the task
+            let current_is_paused = self.is_paused;
+            let current_volume = self.volume;
+            let current_is_muted = self.is_muted;
+
             let handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(StdDuration::from_secs(1)); // Report every second
                 info!("[Reporter] Progress reporter task started for item {}", initial_item_id);
@@ -268,14 +273,13 @@ impl Player {
                                 };
                                 let position_ticks = (current_secs * 10_000_000.0) as i64;
 
-                                // Send only progress ticks. WebSocketHandler will add pause/vol/mute state.
+                                // Send full progress state using the captured values
                                 let update = PlayerStateUpdate::Progress {
                                     item_id: initial_item_id.clone(),
                                     position_ticks,
-                                    // These will be filled by WebSocketHandler
-                                    is_paused: false, // Placeholder
-                                    volume: 0,        // Placeholder
-                                    is_muted: false,  // Placeholder
+                                    is_paused: current_is_paused, // Use captured value
+                                    volume: current_volume,       // Use captured value
+                                    is_muted: current_is_muted,   // Use captured value
                                 };
                                 if tx.send(update).is_err() {
                                     warn!("[Reporter] Update channel closed. Stopping reporter.");
@@ -332,9 +336,9 @@ impl Player {
              self.send_update(PlayerStateUpdate::Progress {
                  item_id: id,
                  position_ticks: self.position_ticks,
-                 is_paused: self.is_paused,
-                 volume: self.volume,
-                 is_muted: self.is_muted,
+                 is_paused: self.is_paused, // Add player state
+                 volume: self.volume,       // Add player state
+                 is_muted: self.is_muted,   // Add player state
              });
         }
         // TODO: Implement actual ALSA pause functionality here
@@ -352,9 +356,9 @@ impl Player {
              self.send_update(PlayerStateUpdate::Progress {
                  item_id: id,
                  position_ticks: self.position_ticks,
-                 is_paused: self.is_paused,
-                 volume: self.volume,
-                 is_muted: self.is_muted,
+                 is_paused: self.is_paused, // Add player state
+                 volume: self.volume,       // Add player state
+                 is_muted: self.is_muted,   // Add player state
              });
         }
         // TODO: Implement actual ALSA resume functionality here
@@ -481,24 +485,22 @@ impl Player {
         let clamped_volume = volume.min(100); // Ensure volume is 0-100
         info!("[PLAYER] Setting volume to {}", clamped_volume);
         self.volume = clamped_volume as i32;
-        // Send VolumeChanged update
-        self.send_update(PlayerStateUpdate::VolumeChanged {
-            volume: self.volume,
-            is_muted: self.is_muted,
-            current_item_id: self.current_item_id.clone(),
-        });
+        // Volume changes are implicitly reported via Progress updates
+        // which fetch the latest state in the WS handler.
+        // No specific VolumeChanged update needed here.
+        // Consider sending a Progress update if immediate feedback is desired.
+        // self.send_progress_update().await; // Example if needed
         // TODO: Implement actual ALSA volume control
     }
 
     pub async fn toggle_mute(&mut self) {
         self.is_muted = !self.is_muted;
         info!("[PLAYER] Mute toggled: {}", self.is_muted);
-        // Send VolumeChanged update (as mute is part of volume state)
-        self.send_update(PlayerStateUpdate::VolumeChanged {
-            volume: self.volume,
-            is_muted: self.is_muted,
-            current_item_id: self.current_item_id.clone(),
-        });
+        // Mute changes are implicitly reported via Progress updates
+        // which fetch the latest state in the WS handler.
+        // No specific VolumeChanged update needed here.
+        // Consider sending a Progress update if immediate feedback is desired.
+        // self.send_progress_update().await; // Example if needed
         // TODO: Implement actual ALSA mute control
     }
 
@@ -510,9 +512,9 @@ impl Player {
              self.send_update(PlayerStateUpdate::Progress {
                  item_id: id,
                  position_ticks: self.position_ticks,
-                 is_paused: self.is_paused,
-                 volume: self.volume,
-                 is_muted: self.is_muted,
+                 is_paused: self.is_paused, // Add player state
+                 volume: self.volume,       // Add player state
+                 is_muted: self.is_muted,   // Add player state
              });
         }
         // TODO: Implement actual ALSA seek functionality

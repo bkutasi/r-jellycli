@@ -34,7 +34,7 @@
    - Improve error handling and return types
    - Add comprehensive documentation (ongoing)
    - Add more extensive testing
-   - Status: In Progress
+   - Status: In Progress (Significant progress made via core component refactoring, ongoing for docs/testing)
    - Estimate: 1-2 days
 
 2. **Error Recovery**
@@ -106,6 +106,14 @@
    - Added shared state for `AlsaPlayer` to report playback time.
    - Refactored `Player` to manage background tasks for playback and reporting.
    - Status: Completed (Requires testing for UI visibility/control)
+
+10. **Core Component Refactoring**
+   - Refactored `jellyfin::websocket`, `jellyfin::api`, and `audio::playback` modules.
+   - Extracted `ws_incoming_handler.rs` from `websocket.rs`.
+   - Decomposed `playback.rs` into multiple sub-modules (`decoder.rs`, `alsa_handler.rs`, etc.).
+   - Improved modularity, maintainability, and logging.
+   - Status: Completed
+
 
 ## Backlog
 

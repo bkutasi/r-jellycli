@@ -1,6 +1,7 @@
 //! Playback-related data models for Jellyfin API
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Information for reporting playback progress
 #[derive(Serialize, Debug)]
@@ -137,4 +138,42 @@ impl PlaybackStopInfo {
             play_session_id: session_id, // Use the same session ID for simplicity
         }
     }
+}
+
+
+// --- Incoming WebSocket Command Structures ---
+
+/// Represents a general command received via WebSocket (e.g., SetVolume).
+#[derive(Deserialize, Debug, Clone)]
+pub struct GeneralCommand {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Arguments")]
+    pub arguments: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Represents a playback state command received via WebSocket (e.g., PlayPause, Stop).
+#[derive(Deserialize, Debug, Clone)]
+pub struct PlayStateCommand {
+    #[serde(rename = "Command")]
+    pub command: String,
+    // Arguments might be needed for Seek, etc.
+    #[serde(rename = "SeekPositionTicks")]
+    pub seek_position_ticks: Option<i64>,
+    #[serde(rename = "ControllingUserId")]
+    pub controlling_user_id: Option<String>, // Added based on potential Jellyfin structure
+}
+
+/// Represents a command to initiate playback received via WebSocket (e.g., PlayNow).
+#[derive(Deserialize, Debug, Clone)]
+pub struct PlayCommand {
+    #[serde(rename = "PlayCommand")]
+    pub play_command: String,
+    #[serde(rename = "ItemIds")]
+    pub item_ids: Vec<String>,
+    #[serde(rename = "StartIndex")]
+    pub start_index: Option<i32>,
+    // Add other potential fields if needed based on Jellyfin API
+    #[serde(rename = "StartPositionTicks")]
+    pub start_position_ticks: Option<i64>,
 }

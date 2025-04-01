@@ -6,6 +6,7 @@ pub mod models;
 mod models_playback;
 mod session;
 pub mod websocket;
+mod ws_incoming_handler;
 #[cfg(test)]
 mod tests;
 

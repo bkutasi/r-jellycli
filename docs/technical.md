@@ -67,9 +67,24 @@
 ### Current Structure
 - `src/main.rs`: Application entry point (binary).
 - `src/lib.rs`: Library root, defining shared modules.
-- `src/audio/`: Audio playback using ALSA (`mod.rs`, `playback.rs`).
+- `src/audio/`: Audio playback using ALSA. Refactored into multiple modules:
+  - `mod.rs`: Module declaration.
+  - `playback.rs`: Main `AlsaPlayer` struct and playback orchestration logic.
+  - `decoder.rs`: Symphonia-based audio decoding.
+  - `alsa_handler.rs`: Low-level ALSA PCM interaction.
+  - `stream_wrapper.rs`: Wrapper for the HTTP stream from `reqwest`.
+  - `format_converter.rs`: Sample format conversion utilities.
+  - `progress.rs`: Playback progress tracking structures and logic.
+  - `error.rs`: Audio-specific error types.
 - `src/config/`: Configuration management (`mod.rs`, `settings.rs`).
-- `src/jellyfin/`: Jellyfin API client implementation (`mod.rs`, `api.rs`, `auth.rs`, `models.rs`).
+- `src/jellyfin/`: Jellyfin API client implementation:
+  - `mod.rs`: Module declaration.
+  - `api.rs`: Core REST API interaction logic.
+  - `auth.rs`: Authentication handling.
+  - `models.rs`, `models_playback.rs`: Data structures for API responses.
+  - `session.rs`: Session management.
+  - `websocket.rs`: WebSocket connection management and outgoing message handling.
+  - `ws_incoming_handler.rs`: Logic for handling incoming WebSocket messages.
 - `src/ui/`: Command-line interface and user interaction (`mod.rs`, `cli.rs`).
 - `tests/`: Contains integration and manual tests.
 
