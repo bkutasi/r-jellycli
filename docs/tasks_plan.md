@@ -6,7 +6,7 @@
 
 **Project Phase**: Core Functionality Implementation
 
-**Last Updated**: April 1, 2025
+**Last Updated**: April 1, 2025 (State Reporting Update)
 
 ## Priority Tasks
 
@@ -34,8 +34,8 @@
    - Add volume control
    - Implement seek functionality
    - Add pause/resume capabilities
-   - Status: Not Started
-   - Estimate: 2-3 days
+   - Status: Partially Implemented (State reporting via WebSocket is done; ALSA-level pause/seek/volume control is TODO)
+   - Estimate: 1-2 days (Remaining for ALSA controls)
 
 ### Medium Priority
 
@@ -133,6 +133,12 @@
    - Established stable WebSocket communication for session reporting and remote control.
    - Status: Completed
 
+9. **Jellyfin Remote Control State Reporting**
+   - Implemented mechanism for `Player` to report state (Start, Stop, Progress) via channel to `WebSocketHandler`.
+   - `WebSocketHandler` now sends `PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress` messages to Jellyfin server.
+   - Added shared state for `AlsaPlayer` to report playback time.
+   - Refactored `Player` to manage background tasks for playback and reporting.
+   - Status: Completed (Requires testing for UI visibility/control)
 
 ## Backlog
 

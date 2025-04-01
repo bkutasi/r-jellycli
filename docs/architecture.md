@@ -64,16 +64,21 @@ graph TD
   - Handling parent/child navigation
   - Streaming URL generation
   - Session management for remote control
-  - WebSocket communication for real-time updates and commands
+  - WebSocket communication for real-time updates and commands (receiving commands, sending state updates)
+  - Listens for `PlayerStateUpdate` messages via a channel to send `PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress` to the server.
 
-#### 3. Media Playback Engine (`audio` module)
-- **Responsibility**: Playing audio through ALSA interface
-- **Implementation**: `src/audio/playback.rs`
+#### 3. Player Orchestrator & Playback Engine (`player` and `audio` modules)
+- **Responsibility**: Manages the overall playback lifecycle, coordinates audio output, and reports state back to the Jellyfin server.
+- **Implementation**:
+    - **`Player` (`src/player.rs`)**: Central orchestrator. Spawns and manages background tasks for audio playback and progress reporting. Communicates state changes (`PlayerStateUpdate`) via a Tokio MPSC channel to the `WebSocketHandler`. Uses broadcast channels for task shutdown.
+    - **`AlsaPlayer` (`src/audio/playback.rs`)**: Handles the low-level audio playback via ALSA. Decodes streams (using Symphonia) and writes to the ALSA device. Reports current playback time via shared state (`Arc<StdMutex<PlaybackProgressInfo>>`).
 - **Key Features**:
-  - ALSA device setup and configuration
-  - Audio stream decoding and processing (using Symphonia)
-  - Playback lifecycle management (play, pause, stop, seek - partially implemented)
-  - Integration with Tokio for asynchronous streaming
+  - Asynchronous task management for playback and progress reporting.
+  - Decoupled state communication using channels and shared memory.
+  - ALSA device setup and configuration.
+  - Audio stream decoding and processing.
+  - Playback lifecycle management (Start, Stop implemented; Pause, Seek, Volume TODO).
+  - Periodic progress reporting to Jellyfin server via WebSocket.
 
 #### 4. Configuration Management (`config` module)
 - **Responsibility**: Managing user settings and application configuration
@@ -109,7 +114,11 @@ graph TD
 9.  **Navigation** → User navigates through folders and selects media.
 10. **Playback Initiation** → (Local or Remote) Command received (CLI or WebSocket) to play media.
 11. **Streaming URL** → Application gets playback info and streaming URL (HTTP).
-12. **Playback** → Audio is streamed (HTTP) and played through the specified ALSA device via the Media Playback Engine. Status updates sent via WebSocket.
+12. **Playback & State Reporting** →
+    *   `Player` starts `AlsaPlayer` task for audio streaming (HTTP) and playback via ALSA.
+    *   `Player` starts a progress reporting task that reads time from `AlsaPlayer`'s shared state.
+    *   `Player` sends `Start`, `Stop`, `Progress` updates via the `PlayerStateUpdate` channel.
+    *   `WebSocketHandler` receives channel updates and sends corresponding JSON messages (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) to the Jellyfin server.
 13. **Configuration Update** → Any new settings are saved back to config file on exit.
 
 ## Key Interfaces
@@ -153,6 +162,16 @@ graph TD
 4.  **SsdpBroadcaster Task**
     - Runs independently, requires configuration (`DeviceId`).
     - Interacts with the network via UDP.
+
+5.  **`PlayerStateUpdate` Channel (Tokio MPSC)**
+    - **Purpose**: Communication channel from `Player` to `WebSocketHandler`.
+    - **Messages**: Enum (`PlayerStateUpdate`) indicating playback start, stop, progress, volume/mute changes.
+    - **Mechanism**: `Player` sends updates; `WebSocketHandler` receives and translates them into WebSocket messages for the Jellyfin server.
+
+6.  **`PlaybackProgressInfo` Shared State (`Arc<StdMutex<...>>`)**
+    - **Purpose**: Communication channel from `AlsaPlayer` to `Player`'s progress reporting task.
+    - **Data**: Contains current playback position (e.g., seconds).
+    - **Mechanism**: `AlsaPlayer` updates the state during playback; `Player`'s background task reads it periodically to send `Progress` updates via the MPSC channel.
 
 ## Security Considerations
 

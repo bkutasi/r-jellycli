@@ -1,11 +1,11 @@
 //! Jellyfin API client module for interacting with Jellyfin media server
 
-mod api;
+pub mod api;
 mod auth;
-mod models;
+pub mod models;
 mod models_playback;
 mod session;
-mod websocket;
+pub mod websocket;
 #[cfg(test)]
 mod tests;
 

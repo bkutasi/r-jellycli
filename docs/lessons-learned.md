@@ -34,6 +34,25 @@
      - Changed `SetRepeat` to `SetRepeatMode`
      - Changed `SetShuffle` to `SetShuffleQueue`
 
+
+### WebSocket State Reporting
+
+1.  **Required Messages**:
+    *   To make the client controllable and visible in the Jellyfin UI's "Now Playing" section, specific WebSocket messages must be sent *from* the client *to* the server.
+    *   Key messages include `PlaybackStart`, `PlaybackStopped`, and `ReportPlaybackProgress`.
+
+2.  **Progress Reporting**:
+    *   `ReportPlaybackProgress` needs to be sent periodically (e.g., every few seconds) while playback is active.
+    *   It requires the current playback position, typically in Ticks (10,000,000 ticks = 1 second). The `Player` needs a mechanism to get this information from the actual audio playback component (`AlsaPlayer`).
+
+3.  **Decoupled Architecture Pattern**:
+    *   Using asynchronous channels (like Tokio MPSC) to send state updates (`PlayerStateUpdate` enum) from the central `Player` to the `WebSocketHandler` works well.
+    *   Using shared, thread-safe state (`Arc<StdMutex<...>>`) allows the low-level playback component (`AlsaPlayer`) to report its current position back to the `Player`'s progress reporting task without tight coupling.
+
+4.  **Background Task Management**:
+    *   The `Player` needs to manage background Tokio tasks for both audio playback and periodic progress reporting.
+    *   Using broadcast channels for shutdown signals provides a clean way to terminate these tasks when playback stops or the application exits.
+
 ## Implementation Patterns from jellycli (Go)
 
 1. **Device ID Generation**

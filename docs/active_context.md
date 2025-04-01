@@ -42,7 +42,15 @@
 - ✅ **Blockers Resolved**
   - The previous blocker regarding client visibility in the "Play On" menu is resolved due to the stable WebSocket connection.
 
+- ✅ **Jellyfin Remote Control State Reporting**
+  - Implemented state reporting (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) from `Player` -> `WebSocketHandler` -> Jellyfin Server.
+  - Utilized Tokio MPSC channel (`PlayerStateUpdate`) for communication between `Player` and `WebSocketHandler`.
+  - Used shared state (`Arc<StdMutex<PlaybackProgressInfo>>`) for `AlsaPlayer` to report playback time to `Player`.
+  - Refactored `Player` to manage background tasks for playback and progress reporting.
+  - Code compiles, but requires testing to confirm UI visibility and control in Jellyfin Web UI.
+
 **Next Steps**:
-1.  Focus on the next high-priority tasks from `docs/tasks_plan.md`, such as implementing real streaming/decoding or enhancing playback controls.
-2.  Perform thorough testing of remote control commands now that the WebSocket connection is stable.
-3.  Continue refining error handling and documentation based on recent changes.
+1.  **Test State Reporting**: Verify that the client's playback state (start, stop, progress) is correctly reflected in the Jellyfin Web UI and that basic remote control commands (like stop) work.
+2.  **Implement Remaining Playback Controls**: Add ALSA-level implementation for pause, seek, and volume control, and integrate them with the `Player` and WebSocket communication.
+3.  **Address Other High-Priority Tasks**: Continue with tasks like real streaming/decoding improvements as per `docs/tasks_plan.md`.
+4.  **Refine Documentation**: Update documentation based on testing results and further implementation.

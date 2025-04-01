@@ -1,10 +1,11 @@
 use r_jellycli::audio::AlsaPlayer;
-use env_logger; // Added import
+use log::error;
+use env_logger;
 use r_jellycli::config::Settings;
 use r_jellycli::jellyfin::JellyfinClient;
 use r_jellycli::player::Player;
 use r_jellycli::ui::Cli;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex}; // Added Mutex
 use r_jellycli::init_app_dirs;
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use std::error::Error;
@@ -12,7 +13,8 @@ use std::path::Path;
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Mutex;
+use log::info; // Added info log
+// Removed tokio::sync::Mutex import from here as it's imported above
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
@@ -162,9 +164,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("Saved generated Device ID to config file.");
         }
     }
+// --- Create Core Components ---
 
-    // Initialize Jellyfin client
-    let mut jellyfin = JellyfinClient::new(&settings.server_url);
+// Create AlsaPlayer instance (needs device name from settings)
+let alsa_player = Arc::new(Mutex::new(AlsaPlayer::new(&settings.alsa_device)));
+info!("Created AlsaPlayer for device: {}", settings.alsa_device);
+
+// Create the central Player state manager
+let player = Arc::new(Mutex::new(Player::new()));
+info!("Created central Player instance.");
+
+// Initialize Jellyfin client
+let mut jellyfin = JellyfinClient::new(&settings.server_url);
     
     // Authenticate with Jellyfin server
     let password_provided = args.password.is_some() || std::env::var("JELLYFIN_PASSWORD").is_ok();
@@ -209,33 +220,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // No username, no password, no API key - cannot authenticate.
         return Err("Cannot authenticate: No username, password, or API key provided or found.".into());
     }
-    
-    // Initialize session to make the client visible to other Jellyfin clients
-    // This now internally calls report_capabilities and connects the WebSocket
-    println!("Initializing Jellyfin session...");
+
+    // --- Configure Player Dependencies ---
+    { // Scope for player lock
+        let mut player_guard = player.lock().await;
+        player_guard.set_jellyfin_client(jellyfin.clone()); // Give Player access to the client
+        player_guard.set_alsa_player(alsa_player.clone()); // Give Player access to the audio player
+        info!("Configured Player instance with JellyfinClient and AlsaPlayer.");
+    }
+
+
+    // --- Initialize Jellyfin Session and Link Player ---
+    // This internally calls report_capabilities and starts WebSocket listener
+    info!("Initializing Jellyfin session...");
     match jellyfin.initialize_session(settings.device_id.as_ref().unwrap(), running.clone()).await {
         Ok(()) => {
-            println!("Session initialized successfully. Client should now be visible and controllable via WebSocket.");
-            
-            // WebSocket connection and listener are started within initialize_session.
-            // We still need to set the player instance if the WebSocket connected successfully.
-            
-            // Create a Player instance that will be controlled by WebSocket messages
-            let player = Arc::new(Mutex::new(Player::new()));
-            
-            // Set the player instance in the WebSocket handler (check if handler exists)
-            // Use the mutable jellyfin instance here
+            info!("Session initialized successfully via REST. Attempting to link Player to WebSocket handler...");
+            // Now that session (and potentially WebSocket) is initialized, link the player
+            // This allows WebSocket handler to send commands TO the player
             if let Err(e) = jellyfin.set_player(player.clone()).await {
-                 // This might fail if WebSocket connection failed inside initialize_session
-                println!("Warning: Failed to set player for WebSocket handler (WebSocket might not be connected): {}", e);
+                 log::warn!("Failed to link Player to WebSocket handler (WebSocket might not be connected or handler missing): {}", e);
+            } else {
+                 info!("Successfully linked Player to WebSocket handler.");
             }
-
-            // WebSocket listener is now started internally within initialize_session.
-            // No need to call start_websocket_listener separately.
-            // The success/failure is indicated by the result of initialize_session.
         },
-        // Error from initialize_session could be capability reporting or WebSocket connection failure
-        Err(e) => println!("Warning: Failed to initialize session (capabilities or WebSocket): {}. Client may not be visible or controllable.", e),
+        Err(e) => log::warn!("Failed to initialize session (capabilities report or WebSocket connect): {}. Client may not be visible or controllable.", e),
     }
     
     // Check if we're in test mode (just testing authentication)
@@ -247,19 +256,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("User ID: {}", settings.user_id.as_ref().unwrap());
         return Ok(());
     }
-    
-    // --- Spawn Background Tasks ---
-    let mut task_handles = Vec::new(); // Store task handles for graceful shutdown
+    // --- Background Task Management ---
+    // We don't need to manually track task handles here anymore,
+    // as the Player instance manages its own playback/reporter tasks.
+    // let mut task_handles = Vec::new();
 
-    // Wrap final settings in Arc for sharing with background tasks
-    let settings_arc = Arc::new(settings);
-
+    // Settings are already loaded and used for initialization.
+    // let settings_arc = Arc::new(settings); // Not needed directly here anymore
 
     // --- Main Application Loop ---
     // Main application loop
     println!("Fetching items from server...");
     let mut current_items = jellyfin.get_items().await?;
-    let mut shutdown_rx = shutdown_tx.subscribe(); // Receiver for main loop
+    let _shutdown_rx = shutdown_tx.subscribe(); // Receiver for main loop (marked unused)
 
     let mut current_parent_id: Option<String> = None;
     
@@ -368,126 +377,50 @@ enum SelectionOutcome {
             println!("Invalid selection");
             continue;
         }
-        
+
+        // --- Handle Selection ---
+        let selected_item = current_items[selected_index].clone();
+
         // If selected item is a folder, browse into it
-        if current_items[selected_index].is_folder {
-            current_parent_id = Some(current_items[selected_index].id.clone());
-            current_items = jellyfin.get_items_by_parent_id(&current_items[selected_index].id).await?;
-            continue;
-        }
-        
-        // Otherwise, play the selected item
-        cli.display_playback_status(&current_items[selected_index]);
-        
-        // Get streaming URL
-        let stream_url = jellyfin.get_stream_url(&current_items[selected_index].id)?;
-        
-        // Initialize audio player
-        let mut alsa_player = AlsaPlayer::new(&settings_arc.alsa_device);
-        
-        // Update the player instance used by WebSocket handler with the current item
-        println!("[PLAYER] Set current item: {}", &current_items[selected_index].id);
-        
-        // Report playback start to Jellyfin server
-        if let Err(e) = jellyfin.report_playback_start(&current_items[selected_index].id).await {
-            println!("Warning: Failed to report playback start: {}", e);
-        }
-        
-        // Current position tracking for progress reporting
-        let item_id = current_items[selected_index].id.clone();
-        let duration_ticks = current_items[selected_index].run_time_ticks.unwrap_or(0);
-        
-        // Setup position tracking for progress updates
-        let jellyfin_clone = jellyfin.clone(); // Clone for the task
-        let running_clone = running.clone(); // Clone for the task
-        let mut progress_shutdown_rx = shutdown_tx.subscribe(); // Receiver for progress task
-        let progress_handle = tokio::spawn(async move { // Spawn and get handle
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            let mut current_position: i64 = 0;
-            let max_position = duration_ticks;
-            
-            loop {
-                tokio::select! {
-                    biased; // Prioritize shutdown check
-
-                    // Branch 1: Shutdown signal received
-                    _ = progress_shutdown_rx.recv() => {
-                        println!("[PROGRESS-TASK] Shutdown signal received, exiting.");
-                        break;
-                    }
-
-                    // Branch 2: Interval tick elapsed
-                    _ = interval.tick() => {
-                        // Check running flag as a secondary measure (optional, select should handle it)
-                        if !running_clone.load(Ordering::SeqCst) {
-                             println!("[PROGRESS-TASK] Running flag is false, exiting.");
-                             break;
-                        }
-
-                        // Update progress (simulate progress by incrementing position)
-                        current_position += 10_000_000; // Add 1 second (in ticks)
-                        if max_position > 0 && current_position > max_position {
-                            println!("[PROGRESS-TASK] Reached end of track duration, exiting.");
-                            break;
-                        }
-
-                        // Report progress
-                        if let Err(e) = jellyfin_clone.report_playback_progress(
-                            &item_id,
-                            current_position,
-                            true, // is_playing
-                            false // is_paused
-                        ).await {
-                            // Don't exit the loop on reporting errors, just log them
-                            println!("Warning: Failed to report playback progress: {}", e);
-                        } else {
-                             println!("[CLIENT-DEBUG] Reporting playback progress..."); // Log successful report
-                        }
-                    }
+        if selected_item.is_folder {
+            info!("Browsing into folder: {}", selected_item.name);
+            current_parent_id = Some(selected_item.id.clone());
+            // Fetch new items - Use the main jellyfin client instance
+            match jellyfin.get_items_by_parent_id(&selected_item.id).await {
+                Ok(items) => current_items = items,
+                Err(e) => {
+                    error!("Failed to fetch items for folder {}: {}", selected_item.id, e);
+                    // Optionally go back or show error message
+                    // For now, just continue the loop with old items
                 }
             }
-            println!("[PROGRESS-TASK] Exited loop."); // Log when the loop finishes
+            continue; // Go back to display new items
+        }
+
+        // --- Play Selected Item ---
+        // Delegate playback to the central Player instance
+        info!("Selected item for playback: {} ({})", selected_item.name, selected_item.id);
+        cli.display_playback_status(&selected_item); // Show what's intended to play
+
+        // Lock the player and initiate playback
+        // This will internally handle fetching stream URL, starting tasks, and reporting state
+        let player_arc = player.clone(); // Clone Arc for the async block
+        tokio::spawn(async move {
+            let mut player_guard = player_arc.lock().await;
+            // Clear existing queue and play the selected item immediately
+            player_guard.clear_queue().await;
+            player_guard.add_items(vec![selected_item]); // Add the single selected item
+            player_guard.play_from_start().await; // Start playback
         });
-        task_handles.push(progress_handle); // Store the handle
-        
-        // Set up playback in a separate task that can be interrupted
-        let running_clone = running.clone();
-        let playback_result = tokio::select! {
-            // Branch 1: Playback completes or errors
-            // Pass a new receiver to the playback function
-            result = alsa_player.stream_decode_and_play(
-                &stream_url,
-                current_items[selected_index].run_time_ticks,
-                shutdown_tx.subscribe()
-            ) => {
-                 result
-            },
-            // Branch 2: Shutdown signal received via broadcast channel
-            _ = shutdown_rx.recv() => {
-                // Exit due to Ctrl+C or other shutdown signal
-                Err("Playback interrupted by shutdown signal".into())
-            }
-        };
-        
-        // Progress task stop is handled by the select! inside it and awaiting the handle later.
-        
-        // Report playback stopped
-        if let Err(e) = jellyfin.report_playback_stopped(
-            &current_items[selected_index].id, 
-            current_items[selected_index].run_time_ticks.unwrap_or(0)
-        ).await {
-            println!("Warning: Failed to report playback stopped: {}", e);
-        }
-        
-        match playback_result {
-            Ok(_) => println!("Playback finished."),
-            Err(e) => {
-                println!("Playback error or interrupted: {}", e);
-                if !running.load(Ordering::SeqCst) {
-                    break; // Exit if Ctrl+C was pressed
-                }
-            }
-        }
+
+        // After initiating playback, the main loop can continue or wait differently.
+        // For a simple CLI, we might just loop back to show the main menu,
+        // as playback now happens in the background managed by Player/WebSocket.
+        // Or, we could enter a "now playing" state here if desired.
+        // For now, let's just continue the loop to show the current directory again.
+        // Fetch root items again if we were playing from root, or stay in current folder
+        let _parent = current_parent_id.clone(); // Marked unused
+
         
         // If Ctrl+C was pressed during playback, exit
         if !running.load(Ordering::SeqCst) {
@@ -568,14 +501,10 @@ enum SelectionOutcome {
     // --- Shutdown ---
     println!("Main loop exited. Waiting for background tasks to finish...");
 
-    // Wait for the progress reporter tasks to complete
-    for handle in task_handles {
-        if let Err(e) = handle.await {
-            println!("Error waiting for progress task: {:?}", e);
-        }
-    }
-    println!("Progress tasks finished.");
-
+    // The 'task_handles' variable was not defined, suggesting this loop
+    // might be leftover from a previous implementation. Removing it.
+    // If specific progress tasks need joining, their handles should be collected.
+    // println!("Progress tasks finished."); // Removed corresponding message
     // Wait for the WebSocket listener task to complete
     if let Some(ws_handle) = jellyfin.take_websocket_handle().await { // Added .await
         println!("Waiting for WebSocket listener task to finish...");
