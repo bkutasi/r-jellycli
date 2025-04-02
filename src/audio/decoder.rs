@@ -7,11 +7,11 @@ use symphonia::core::audio::{SignalSpec, AudioBuffer}; // Removed unused AudioBu
 use symphonia::core::sample::i24; // Import the i24 type
 use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, Packet, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatOptions, FormatReader, Packet};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::units::{Time, TimeBase};
+use symphonia::core::units::TimeBase;
 // Removed unused TypeId import
 use tokio::sync::broadcast;
 use tokio::task; // Restore task import

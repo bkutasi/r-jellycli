@@ -6,10 +6,10 @@ use crate::jellyfin::models_playback::{GeneralCommand, PlayCommand, PlayStateCom
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+// Removed unused imports: AtomicBool, Ordering
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, sync::broadcast}; // Add broadcast import
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -204,7 +204,8 @@ impl WebSocketHandler {
     /// and returning a `PreparedWebSocketHandler` which owns the stream and channel receiver.
     pub fn prepare_for_listening(
         &mut self,
-        shutdown_signal: Arc<AtomicBool>,
+        // Change signature to accept broadcast::Receiver
+        shutdown_rx: broadcast::Receiver<()>,
     ) -> Option<PreparedWebSocketHandler> {
         let ws_stream = match self.ws_stream.take() {
             Some(stream) => stream,
@@ -235,7 +236,7 @@ impl WebSocketHandler {
         Some(PreparedWebSocketHandler {
             websocket: ws_stream,
             player: self.player.clone(), // Clone Arc<Mutex<Player>>
-            shutdown_signal,
+            shutdown_rx, // Store the receiver
             jellyfin_client: self.jellyfin_client.clone(),
             player_update_rx: rx, // Pass the receiver
         })
@@ -250,7 +251,8 @@ impl WebSocketHandler {
 pub struct PreparedWebSocketHandler {
     websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     player: Option<Arc<Mutex<Player>>>, // Keep Arc<Mutex<Player>> for state access
-    shutdown_signal: Arc<AtomicBool>,
+    // Replace AtomicBool with broadcast::Receiver
+    shutdown_rx: broadcast::Receiver<()>,
     jellyfin_client: JellyfinClient,
     player_update_rx: mpsc::UnboundedReceiver<PlayerStateUpdate>,
 }
@@ -258,18 +260,13 @@ pub struct PreparedWebSocketHandler {
 impl PreparedWebSocketHandler {
     /// Listens for commands from the Jellyfin server and player updates.
     /// This is the main loop for the active WebSocket connection.
+    // Make self mutable for shutdown_rx.recv()
     pub async fn listen_for_commands(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("[WS Listen] Starting WebSocket listening loop...");
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30)); // Standard interval
 
         loop {
-            // Check shutdown signal at the beginning of each loop iteration
-            // Ordering::Relaxed might be sufficient if precise synchronization isn't critical here.
-            // Using SeqCst for safety unless performance becomes an issue.
-            if !self.shutdown_signal.load(Ordering::SeqCst) {
-                info!("[WS Listen] Shutdown signal received. Exiting loop.");
-                break;
-            }
+            // No longer need manual check here, handled by select!
 
             trace!("[WS Listen] Entering select! statement.");
             tokio::select! {
@@ -314,12 +311,7 @@ impl PreparedWebSocketHandler {
 
                 // --- Branch 3: Ping Interval ---
                 _ = ping_interval.tick() => {
-                    trace!("[WS Listen] select! resolved: ping_interval.tick()");
-                     // Re-check shutdown signal before sending ping
-                    if !self.shutdown_signal.load(Ordering::SeqCst) {
-                        info!("[WS Listen] Shutdown signal received before ping. Exiting loop.");
-                        break;
-                    }
+                    trace!("[WS Listen] select! resolved: ping_interval.tick()"); // No need to check shutdown here anymore
                     if let Err(e) = self.send_keep_alive_ping().await {
                          error!("[WS Listen] Failed to send WebSocket ping: {}. Returning error.", e);
                          // Return the error *before* awaiting the close, as 'e' might not be Send
@@ -330,6 +322,13 @@ impl PreparedWebSocketHandler {
                          return Err(error_to_return);
                          // let _ = self.websocket.close(None).await; // This await caused the Send issue
                     }
+                },
+
+                // --- Branch 4: Shutdown Signal ---
+                _ = self.shutdown_rx.recv() => {
+                    trace!("[WS Listen] select! resolved: shutdown_rx.recv()");
+                    info!("[WS Listen] Shutdown signal received via broadcast channel. Exiting loop.");
+                    break; // Exit the loop
                 }
             }
             trace!("[WS Listen] Reached end of loop iteration.");

@@ -32,6 +32,14 @@ use std::any::TypeId; // For checking generic type S
 
 const LOG_TARGET: &str = "r_jellycli::audio::playback"; // Main orchestrator log target
 
+
+/// Indicates the reason why the playback loop terminated successfully.
+#[derive(Debug, PartialEq, Eq)]
+enum PlaybackLoopExitReason {
+    EndOfStream,
+    ShutdownSignal,
+}
+
 /// Manages ALSA audio playback orchestration, using dedicated handlers for ALSA, decoding, etc.
 pub struct PlaybackOrchestrator { // Renamed from AlsaPlayer
     // Wrap the handler in Arc<std::sync::Mutex>
@@ -450,17 +458,17 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
 
 
     /// The main loop for decoding packets and sending them to ALSA.
-    async fn playback_loop( // Removed generic type <S>
+    async fn playback_loop( // Removed generic type <S>, changed return type
         &mut self,
         mut decoder: SymphoniaDecoder,
         pb: Arc<ProgressBar>,
         mut shutdown_rx: broadcast::Receiver<()>,
-    ) -> Result<(), AudioError> {
+    ) -> Result<PlaybackLoopExitReason, AudioError> { // Changed return type
         info!(target: LOG_TARGET, "Starting playback loop.");
         let mut last_progress_update_time = Instant::now();
         let track_time_base = decoder.time_base();
 
-        'decode_loop: loop {
+        loop {
             trace!(target: LOG_TARGET, "--- Playback loop iteration start ---");
             // --- Decode Next Frame (Owned) ---
             let decode_result = decoder.decode_next_frame_owned(&mut shutdown_rx).await;
@@ -531,12 +539,12 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                     info!(target: LOG_TARGET, "Decoder reached end of stream.");
                     trace!(target: LOG_TARGET, "Breaking playback loop due to EndOfStream.");
                     pb.finish_with_message("Playback finished");
-                    break 'decode_loop;
+                    return Ok(PlaybackLoopExitReason::EndOfStream); // Return reason
                 }
                  Ok(DecodeRefResult::Shutdown) => {
                     info!(target: LOG_TARGET, "Decoder received shutdown signal.");
                     pb.abandon_with_message("Playback stopped");
-                    break 'decode_loop;
+                    return Ok(PlaybackLoopExitReason::ShutdownSignal); // Return reason
                 }
                 Err(e) => {
                     error!(target: LOG_TARGET, "Fatal decoder error: {}", e);
@@ -546,21 +554,9 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
             }
         } // end 'decode_loop
 
-        // --- Post-Loop Cleanup ---
-        info!(target: LOG_TARGET, "Playback loop finished.");
-        // Lock the mutex before calling drain
-        if let Ok(guard) = self.alsa_handler.lock() { // Removed mut
-            if let Err(e) = guard.drain() {
-                error!(target: LOG_TARGET, "Error draining ALSA device: {}", e);
-                // Moved misplaced warn! inside the relevant error block
-                warn!(target: LOG_TARGET, "Error draining ALSA buffer after EOF: {}", e);
-            }
-        } else {
-            error!(target: LOG_TARGET, "Failed to lock ALSA handler mutex during drain.");
-        }
-        // Removed extra closing brace from line 383
-
-        Ok(())
+        // --- Post-Loop Cleanup (Drain removed, handled by caller based on exit reason) ---
+        // The loop now handles all exit conditions (EndOfStream, ShutdownSignal, Error)
+        // via return statements, so code execution should not reach here.
     }
 
     // --- Public Methods ---
@@ -629,7 +625,32 @@ if decoder_rate != actual_rate {
         let loop_result = self.playback_loop(decoder, pb, shutdown_rx).await;
 
         // --- End Playback Loop ---
-        loop_result
+        match loop_result {
+            Ok(PlaybackLoopExitReason::EndOfStream) => {
+                info!(target: LOG_TARGET, "Playback loop finished normally (EndOfStream). Draining ALSA buffer...");
+                // Lock the mutex before calling drain
+                if let Ok(guard) = self.alsa_handler.lock() {
+                    if let Err(e) = guard.drain() {
+                        // Log error but don't necessarily fail the whole operation,
+                        // as playback itself completed.
+                        error!(target: LOG_TARGET, "Error draining ALSA buffer after EndOfStream: {}", e);
+                    } else {
+                        debug!(target: LOG_TARGET, "ALSA drain successful after EndOfStream.");
+                    }
+                } else {
+                    error!(target: LOG_TARGET, "Failed to lock ALSA handler mutex during post-EOF drain.");
+                }
+                Ok(()) // Playback completed successfully overall
+            }
+            Ok(PlaybackLoopExitReason::ShutdownSignal) => {
+                info!(target: LOG_TARGET, "Playback loop terminated by shutdown signal. Skipping final drain.");
+                Ok(()) // Shutdown is not an error state for the playback function itself
+            }
+            Err(e) => {
+                error!(target: LOG_TARGET, "Playback loop failed with error: {}", e);
+                Err(e) // Propagate the error
+            }
+        }
     }
 
 
@@ -642,7 +663,7 @@ if decoder_rate != actual_rate {
         // 1. Abandon Progress Bar (Non-blocking)
         if let Some(pb) = self.progress_bar.take() {
             if !pb.is_finished() {
-                pb.abandon_with_message("Playback stopped");
+                pb.finish_and_clear(); // Use finish_and_clear to ensure terminal state restoration
                 debug!(target: LOG_TARGET, "Abandoned progress bar during shutdown.");
             }
         }
@@ -712,7 +733,7 @@ if decoder_rate != actual_rate {
         // We might choose to abandon the progress bar here too, as it's non-blocking.
         if let Some(pb) = self.progress_bar.take() {
              if !pb.is_finished() {
-                 pb.abandon_with_message("Playback stopped (implicit drop)");
+                 pb.finish_and_clear(); // Use finish_and_clear here too for consistency
                  debug!(target: LOG_TARGET, "Abandoned progress bar during synchronous close/drop.");
              }
         }

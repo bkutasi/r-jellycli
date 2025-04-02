@@ -244,7 +244,8 @@ let mut jellyfin = JellyfinClient::new(&settings.server_url);
             info!("Successfully linked Player to WebSocket handler.");
 
             // 3. Start the WebSocket listener task
-            if let Err(e) = jellyfin.start_websocket_listener(running.clone()).await {
+            // Pass the broadcast receiver instead of the AtomicBool
+            if let Err(e) = jellyfin.start_websocket_listener(shutdown_tx.subscribe()).await {
                  log::error!("Failed to start WebSocket listener task: {}", e);
                  // This is likely a significant issue, consider if the app should exit.
             } else {

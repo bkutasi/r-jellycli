@@ -7,12 +7,12 @@ use crate::jellyfin::models::{ItemsResponse, MediaItem, AuthResponse};
 use crate::jellyfin::session::SessionManager;
 use crate::jellyfin::WebSocketHandler;
 use crate::player::Player;
+use std::sync::atomic::AtomicBool;
 use reqwest::{Client, Error as ReqwestError, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc}; // Removed Mutex import as it's already imported below
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -456,7 +456,8 @@ impl JellyfinClient {
 
     /// Spawns the WebSocket listener task.
     /// Requires `initialize_session` and `set_player` to have been called successfully.
-    pub async fn start_websocket_listener(&mut self, shutdown_signal: Arc<AtomicBool>) -> Result<(), JellyfinError> {
+    // Change signature to accept broadcast::Receiver
+    pub async fn start_websocket_listener(&mut self, shutdown_rx: tokio::sync::broadcast::Receiver<()>) -> Result<(), JellyfinError> {
         log::info!("Attempting to start WebSocket listener task...");
 
         let ws_handler_arc = match self.websocket_handler.clone() { // Clone Arc to move into task
@@ -476,7 +477,7 @@ impl JellyfinClient {
         } // Lock released
 
 
-        let shutdown = shutdown_signal.clone();
+        // No longer need to clone the AtomicBool
         log::debug!("Spawning WebSocket listener task...");
 
         let handle = tokio::spawn(async move {
@@ -485,7 +486,8 @@ impl JellyfinClient {
             let prepared_result = {
                  let mut handler_guard = ws_handler_arc.lock().await;
                  // Player should be set now before prepare_for_listening is called
-                 handler_guard.prepare_for_listening(shutdown.clone())
+                 // Pass the receiver instead of the AtomicBool
+                 handler_guard.prepare_for_listening(shutdown_rx)
             }; // MutexGuard dropped here
 
             if let Some(mut prepared_handler) = prepared_result {

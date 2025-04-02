@@ -157,9 +157,10 @@ impl AlsaPcmHandler {
             debug!(target: LOG_TARGET, "Closing ALSA PCM device (state: {:?})...", pcm.state());
             // Attempt drain, but ignore errors during close as we are shutting down anyway.
             if pcm.state() == PcmState::Running || pcm.state() == PcmState::Prepared {
-                match pcm.drain() {
-                    Ok(_) => debug!(target: LOG_TARGET, "ALSA drain successful before closing."),
-                    Err(e) => warn!(target: LOG_TARGET, "Error draining ALSA buffer during close (ignored): {}", e),
+                debug!(target: LOG_TARGET, "Dropping ALSA PCM stream immediately during close.");
+                match pcm.drop() { // Use drop() for immediate stop instead of drain()
+                    Ok(_) => debug!(target: LOG_TARGET, "ALSA drop successful during close."),
+                    Err(e) => warn!(target: LOG_TARGET, "Error dropping ALSA buffer during close (ignored): {}", e),
                 }
             }
             // PCM is dropped here, closing the device
