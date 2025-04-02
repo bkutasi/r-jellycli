@@ -13,6 +13,7 @@
 - **alsa** (v0.6.0): ALSA (Advanced Linux Sound Architecture) bindings for Rust
 - **serde_json** (v1.0): JSON support for serde serialization/deserialization
 - **tokio-tungstenite** (v0.20.1): WebSocket client library for Tokio
+- **rubato** (v0.14): High-quality audio sample rate conversion library
 
 ### External Dependencies
 - **ALSA system libraries**: Required for audio playback on Linux systems
@@ -57,6 +58,9 @@
   - `/Users/{UserId}/Views`: Fetches root media views/libraries.
   - `/Users/{UserId}/Items?ParentId={ParentId}`: Fetches items within a folder.
   - `/Items/{ItemId}/Download`: Used to generate streaming URLs (indirectly).
+  - `/Sessions/Playing` (POST): Reports playback start.
+  - `/Sessions/Playing/Progress` (POST): Reports playback progress periodically.
+  - `/Sessions/Playing/Stopped` (POST): Reports playback stop.
 
 ### API Reference
 - Jellyfin OpenAPI specification is included in the project as `jellyfin-openapi-stable.json`
@@ -73,7 +77,7 @@
   - `decoder.rs`: Symphonia-based audio decoding.
   - `alsa_handler.rs`: Low-level ALSA PCM interaction.
   - `stream_wrapper.rs`: Wrapper for the HTTP stream from `reqwest`.
-  - `format_converter.rs`: Sample format conversion utilities.
+  - `format_converter.rs`: Sample format conversion utilities (including resampling via `rubato`).
   - `progress.rs`: Playback progress tracking structures and logic.
   - `error.rs`: Audio-specific error types.
 - `src/config/`: Configuration management (`mod.rs`, `settings.rs`).
@@ -101,7 +105,10 @@
 1. ALSA device is opened and configured based on settings.
 2. Streaming URL is obtained via `JellyfinClient::get_stream_url`.
 3. Audio data is streamed from the URL using `reqwest`.
-4. Streamed data (placeholder logic currently) is written to the ALSA device.
+4. Streamed data is decoded using Symphonia (`decoder.rs`).
+5. If necessary, audio is resampled using `rubato` (`format_converter.rs`) to match the ALSA device's sample rate.
+6. Processed audio data is written to the ALSA device (`alsa_handler.rs`).
+7. Playback state (Start, Progress, Stop) is reported back to the Jellyfin server via HTTP POST requests (`api.rs`).
 
 ## Testing Strategy
 

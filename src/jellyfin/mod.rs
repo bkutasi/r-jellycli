@@ -3,7 +3,7 @@
 pub mod api;
 mod auth;
 pub mod models;
-mod models_playback;
+pub mod models_playback;
 mod session;
 pub mod websocket;
 mod ws_incoming_handler;

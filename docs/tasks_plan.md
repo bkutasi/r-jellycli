@@ -6,26 +6,23 @@
 
 **Project Phase**: Core Functionality Implementation
 
-**Last Updated**: April 1, 2025 (State Reporting Update)
+**Last Updated**: April 2, 2025 (Audio Playback Fixes & Refactoring)
 
 ## Priority Tasks
 
 ### High Priority
 
 1. **Implement Real Streaming & Decoding**
-   - Replace placeholder audio buffer with actual streaming logic.
-   - Integrate a decoding library (`symphonia`).
-   - Implement proper buffering and error handling.
-   - Status: In Progress (Compilation errors remain in `src/audio/playback.rs` related to `copy_interleaved_ref` and `errno` comparison)
-   - Estimate: 3-4 days (Remaining)
-
-1.1. **Fix Playback Compilation Errors**
-    - Resolve issues with `copy_interleaved_ref` and `errno` in `src/audio/playback.rs`.
-    - Status: Not Started
-    - Estimate: 0.5 days
+   - Replace placeholder audio buffer with actual streaming logic. (Done)
+   - Integrate a decoding library (`symphonia`). (Done)
+   - Implement proper buffering and error handling. (Basic implementation done, needs refinement)
+   - Implement audio resampling (`rubato`). (Done)
+   - Implement correct ALSA writing with underrun handling. (Done)
+   - Status: Mostly Complete (Core pipeline functional, buffering/error handling needs refinement)
+   - Estimate: 1 day (Refinement)
 
 2. **Playback Controls Enhancement**
-   - Status: Partially Implemented (State reporting via WebSocket is done; ALSA-level pause/seek/volume control is TODO)
+   - Status: Partially Implemented (State reporting via HTTP POST is done; ALSA-level pause/seek/volume control is TODO)
    - Estimate: 1-2 days (Remaining for ALSA controls)
 
 ### Medium Priority
@@ -100,6 +97,13 @@
    - Established stable WebSocket communication for session reporting and remote control.
    - Status: Completed
 
+11. **Audio Playback Debugging & Fixes**
+   - Switched playback reporting from WebSocket to HTTP POST (resolving server errors).
+   - Implemented audio resampling using `rubato` to handle sample rate mismatches.
+   - Corrected ALSA underrun (EPIPE) handling to retry writes instead of skipping data.
+   - Refactored shutdown logic into `async fn shutdown` to prevent panics in `Drop`.
+   - Confirmed playback pipeline (decode, resample, write) is functional.
+   - Status: Completed
 9. **Jellyfin Remote Control State Reporting**
    - Implemented mechanism for `Player` to report state (Start, Stop, Progress) via channel to `WebSocketHandler`.
    - `WebSocketHandler` now sends `PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress` messages to Jellyfin server.

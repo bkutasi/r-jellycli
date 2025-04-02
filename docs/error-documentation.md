@@ -66,6 +66,60 @@
 2. Compare network traffic with jellycli (Go) implementation
 3. Test with different Jellyfin server versions
 
+#### Server-Side `ArgumentOutOfRangeException` (WebSocket Reporting)
+
+**Error**: Jellyfin server logs show `System.ArgumentOutOfRangeException` when receiving WebSocket messages like `PlaybackProgress`.
+
+**Symptom**: Errors appear in Jellyfin server logs, potentially disrupting playback state tracking.
+
+**Cause**: Suspected issue within the Jellyfin server's handling of specific WebSocket message formats or timing, particularly `ReportPlaybackProgress`. The exact root cause within the server was difficult to pinpoint.
+
+**Solution**: Switched playback state reporting (`PlaybackStart`, `PlaybackProgress`, `PlaybackStop`) from WebSocket messages to direct HTTP POST requests to the corresponding REST API endpoints. This completely bypassed the problematic WebSocket interaction for reporting.
+
+
+### ALSA Errors
+
+#### ALSA Underrun (EPIPE - Broken Pipe) During Playback
+
+**Error**: `alsa::pcm::IO::writei` returns an error with `errno` code `EPIPE` (32).
+
+**Symptom**: Audio playback might stutter, skip, or stop. Logs may show "ALSA write error: Broken pipe".
+
+**Cause**: The ALSA buffer underran, meaning the application didn't supply audio data fast enough to the sound card. This is often a recoverable condition.
+
+**Solution**:
+1.  **Detect**: Check if the returned `alsa::Error` has an `errno()` equal to `libc::EPIPE`.
+2.  **Recover**: Call `pcm.recover(libc::EPIPE, true)` on the ALSA PCM handle. The `true` argument indicates that the error message should be silenced.
+3.  **Retry**: **Crucially**, retry writing the *same* audio chunk that failed. Do not discard the chunk.
+```rust
+// Inside the write loop in src/audio/playback.rs (_write_to_alsa)
+match self.pcm.writei(buf) {
+    Ok(frames_written) => { /* ... success ... */ }
+    Err(e) => {
+        if let Some(errno) = e.errno() {
+            if errno == libc::EPIPE { // Underrun
+                warn!("ALSA underrun occurred (EPIPE), attempting recovery...");
+                match self.pcm.recover(errno, true) {
+                    Ok(_) => {
+                        warn!("ALSA recovery successful, retrying write.");
+                        // Retry the write for the *same buffer*
+                        // (Logic might involve looping or setting a flag to retry)
+                        continue; // Or adjust loop logic to retry
+                    }
+                    Err(recover_err) => {
+                        error!("ALSA recovery failed: {}", recover_err);
+                        return Err(AudioError::AlsaError(recover_err));
+                    }
+                }
+            }
+        }
+        // Handle other non-recoverable errors
+        error!("Unhandled ALSA write error: {}", e);
+        return Err(AudioError::AlsaError(e));
+    }
+}
+```
+
 ### Rust-Specific Errors
 
 #### Thread Safety in Error Handling
@@ -114,6 +168,34 @@ warning: unused variable: `hostname`
 ```rust
 let _hostname = hostname::get()
 ```
+
+#### Panics During Shutdown (Blocking Operations in `Drop`)
+
+**Error**: Application panics during shutdown, often with messages related to blocking operations or runtime shutdown.
+```
+thread 'main' panicked at 'Cannot drop a runtime in a context where blocking is not allowed. This happens when a runtime is dropped from within an asynchronous context.'
+// Or panics related to Mutex::blocking_lock
+```
+
+**Cause**: Performing potentially blocking operations (like joining tasks, acquiring `blocking_lock` on mutexes, complex I/O) inside the `Drop` implementation of a struct that lives within an async context (managed by Tokio). The `Drop` trait is synchronous and cannot safely execute blocking code when the async runtime is potentially shutting down or from within an async task.
+
+**Solution**:
+1.  Avoid complex or blocking logic in `Drop` for types used in async contexts.
+2.  Implement an explicit `async fn shutdown(&mut self)` method on the relevant struct (e.g., `Player`, `PlaybackOrchestrator`).
+3.  Perform all necessary cleanup (stopping tasks, releasing resources, closing handles) within this `async` method.
+4.  Call this `shutdown()` method explicitly *before* the object goes out of scope or the application exits.
+```rust
+// Example in main.rs
+let mut player = Player::new(...);
+// ... application logic ...
+
+// Before exiting:
+info!("Shutting down player...");
+player.shutdown().await;
+info!("Player shut down complete.");
+// Now `player` can be dropped safely
+```
+
 
 ## Recovery Strategies
 

@@ -1,16 +1,19 @@
-use std::sync::{Arc, Mutex as StdMutex}; // Use StdMutex for shared progress
+use log::trace;
+
+use std::sync::Arc; // Removed Mutex import from std::sync
 use std::time::Duration as StdDuration;
-use tokio::sync::{mpsc, Mutex, broadcast}; // Added broadcast for shutdown
+use tokio::sync::{mpsc, Mutex as TokioMutex, broadcast}; // Use TokioMutex alias
 use tokio::task::JoinHandle;
 use crate::audio::{PlaybackOrchestrator, PlaybackProgressInfo}; // Renamed AlsaPlayer
-use crate::jellyfin::api::JellyfinClient; // Need client for stream URL
+use crate::jellyfin::api::{JellyfinClient, JellyfinError}; // Import JellyfinError
 use crate::jellyfin::models::MediaItem;
-use crate::jellyfin::websocket::PlayerStateUpdate;
+use crate::jellyfin::{PlaybackStartReport, PlaybackStopReport, PlaybackReportBase, QueueItem, PlaybackStoppedInfoInner, PlaybackProgressReport}; // Use re-exported path
+use crate::jellyfin::websocket::PlayerStateUpdate; // Keep for potential UI updates
 use log::{debug, error, info, warn};
 
 // Player struct wraps the audio player and adds remote control capabilities
 pub struct Player {
-    alsa_player: Option<Arc<Mutex<PlaybackOrchestrator>>>, // Renamed from AlsaPlayer
+    alsa_player: Option<Arc<TokioMutex<PlaybackOrchestrator>>>, // Use TokioMutex
     current_item_id: Option<String>,
     position_ticks: i64,
     is_paused: bool,
@@ -24,7 +27,7 @@ pub struct Player {
     // Jellyfin client for fetching stream URLs
     jellyfin_client: Option<JellyfinClient>, // Needs to be set
     // Shared progress state
-    current_progress: Option<Arc<StdMutex<PlaybackProgressInfo>>>,
+    current_progress: Option<Arc<TokioMutex<PlaybackProgressInfo>>>, // Use TokioMutex
     // Handles for background tasks
     playback_task_handle: Option<JoinHandle<Result<(), crate::audio::AudioError>>>,
     reporter_task_handle: Option<JoinHandle<()>>,
@@ -63,7 +66,7 @@ impl Player {
     }
 
     // Keep set_alsa_player if needed for pre-creation, or remove if created on play
-    pub fn set_alsa_player(&mut self, alsa_player: Arc<Mutex<PlaybackOrchestrator>>) { // Renamed from AlsaPlayer
+    pub fn set_alsa_player(&mut self, alsa_player: Arc<TokioMutex<PlaybackOrchestrator>>) { // Use TokioMutex
         info!("[PLAYER] ALSA player instance set.");
         self.alsa_player = Some(alsa_player);
     }
@@ -170,7 +173,14 @@ impl Player {
         }
 
         let item_to_play = self.queue[self.current_queue_index].clone();
-        info!("[PLAYER] Attempting to play: {} ({})", item_to_play.name, item_to_play.id);
+        info!("[PLAYER] Preparing to play: {} ({})", item_to_play.name, item_to_play.id);
+
+        // --- Update Player State Immediately ---
+        // Set state *before* getting URL or reporting start
+        self.current_item_id = Some(item_to_play.id.clone());
+        self.position_ticks = 0;
+        self.is_paused = false; // Playback starts unpaused
+        self.is_playing = true;
 
         // --- Get Stream URL ---
         let stream_url: String = match &self.jellyfin_client { // Added type annotation
@@ -192,8 +202,47 @@ impl Player {
         };
         debug!("[PLAYER] Got stream URL: {}", stream_url);
 
+
+        // --- Report Playback Start via HTTP POST ---
+        if let Some(client) = &self.jellyfin_client {
+            let session_id = client.play_session_id().to_string(); // Get session ID from client
+            let queue_items: Vec<QueueItem> = self.queue.iter().enumerate().map(|(idx, item)| QueueItem {
+                id: item.id.clone(),
+                playlist_item_id: format!("playlistItem{}", idx),
+            }).collect();
+
+            let report_base = PlaybackReportBase {
+                queueable_media_types: vec!["Audio".to_string()],
+                can_seek: true, // Assuming seek is generally possible
+                item_id: item_to_play.id.clone(),
+                media_source_id: item_to_play.id.clone(), // Use item ID as source ID like Go client
+                position_ticks: 0, // Starts at 0
+                volume_level: self.volume,
+                is_paused: self.is_paused,
+                is_muted: self.is_muted,
+                play_method: "DirectPlay".to_string(),
+                play_session_id: session_id,
+                live_stream_id: None, // Go uses "", map to None
+                playlist_length: item_to_play.run_time_ticks.unwrap_or(0), // Use item duration
+                playlist_index: Some(self.current_queue_index as i32), // Current index
+                shuffle_mode: "Sorted".to_string(), // TODO: Add shuffle state later
+                now_playing_queue: queue_items,
+            };
+
+            let start_report = PlaybackStartReport { base: report_base };
+
+            match client.report_playback_start(&start_report).await {
+                Ok(_) => info!("[PLAYER] Reported playback start successfully for item {}", item_to_play.id),
+                Err(e) => error!("[PLAYER] Failed to report playback start for item {}: {}", item_to_play.id, e),
+            }
+        } else {
+            error!("[PLAYER] Cannot report playback start: Jellyfin client not available.");
+        }
+
+        // Send internal update for UI etc. *after* reporting start
+        self.send_update(PlayerStateUpdate::Started { item: item_to_play.clone() });
         // --- Setup for new playback ---
-        let progress_info = Arc::new(StdMutex::new(PlaybackProgressInfo::default()));
+        let progress_info = Arc::new(TokioMutex::new(PlaybackProgressInfo::default())); // Use TokioMutex
         self.current_progress = Some(progress_info.clone());
 
         // Ensure we have an AlsaPlayer instance
@@ -233,26 +282,37 @@ impl Player {
 
 
         // --- Spawn Progress Reporter Task ---
-        let reporter_handle = if let Some(tx) = self.update_tx.clone() {
+        let reporter_handle = if let Some(client) = self.jellyfin_client.clone() { // Need client clone
             let weak_progress = Arc::downgrade(&progress_info); // Use weak ref to avoid cycles
 
-            // --- Reliable State Access for Reporter ---
-            // Clone necessary Arcs/senders needed inside the reporter task
-            // We need a way to get current pause/volume/mute state without deadlocking
-            // Option 4: WebSocketHandler fetches state when receiving Progress update (Chosen for simplicity now)
-
+            // Clone necessary state for the reporter task
             let initial_item_id = item_to_play.id.clone();
+            let item_duration_ticks = item_to_play.run_time_ticks.unwrap_or(0);
+            let session_id = client.play_session_id().to_string();
+            let queue_items: Vec<QueueItem> = self.queue.iter().enumerate().map(|(idx, item)| QueueItem {
+                id: item.id.clone(),
+                playlist_item_id: format!("playlistItem{}", idx),
+            }).collect();
+            let initial_queue_index = self.current_queue_index;
+            // TODO: Add shuffle state tracking later
+            let shuffle_mode = "Sorted".to_string();
+
             // Pass the receiver for this specific reporter
             let mut reporter_shutdown_rx_clone = reporter_shutdown_rx; // Clone receiver for the task
 
-            // Read current state *before* spawning the task
-            let current_is_paused = self.is_paused;
-            let current_volume = self.volume;
-            let current_is_muted = self.is_muted;
+            // Read mutable state *before* spawning the task (will be updated by player actions)
+            // We need a way to get the *current* pause/volume/mute state inside the loop.
+            // Simplest approach: Use the state captured when the task starts. This might lag slightly.
+            // A more complex approach involves channels or shared state for these too.
+            // Let's stick with the captured state for now, similar to the previous internal update approach.
+            let initial_is_paused = self.is_paused;
+            let initial_volume = self.volume;
+            let initial_is_muted = self.is_muted;
+
 
             let handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(StdDuration::from_secs(1)); // Report every second
-                info!("[Reporter] Progress reporter task started for item {}", initial_item_id);
+                info!("[Reporter] HTTP Progress reporter task started for item {}", initial_item_id);
                 loop {
                     tokio::select! {
                         biased; // Check shutdown first
@@ -262,28 +322,44 @@ impl Player {
                         }
                         _ = interval.tick() => {
                             if let Some(progress_arc) = weak_progress.upgrade() {
-                                let current_secs = { // Scope for lock guard
-                                    match progress_arc.lock() {
-                                        Ok(guard) => guard.current_seconds,
-                                        Err(_) => {
-                                            warn!("[Reporter] Progress mutex poisoned.");
-                                            break; // Stop reporting if mutex fails
-                                        }
-                                    }
-                                };
+                                // Lock the async mutex to get current progress
+                                let current_secs = progress_arc.lock().await.current_seconds;
+                                // Note: Tokio's mutex lock doesn't return Result, it panics on poison.
+                                // Removed the previous error handling for PoisonError.
+                                // If the mutex is poisoned, the task will panic and stop.
                                 let position_ticks = (current_secs * 10_000_000.0) as i64;
 
-                                // Send full progress state using the captured values
-                                let update = PlayerStateUpdate::Progress {
+                                // Construct the full progress report
+                                let report_base = PlaybackReportBase {
+                                    queueable_media_types: vec!["Audio".to_string()],
+                                    can_seek: true,
                                     item_id: initial_item_id.clone(),
+                                    media_source_id: initial_item_id.clone(),
                                     position_ticks,
-                                    is_paused: current_is_paused, // Use captured value
-                                    volume: current_volume,       // Use captured value
-                                    is_muted: current_is_muted,   // Use captured value
+                                    volume_level: initial_volume, // Use captured state
+                                    is_paused: initial_is_paused, // Use captured state
+                                    is_muted: initial_is_muted,   // Use captured state
+                                    play_method: "DirectPlay".to_string(),
+                                    play_session_id: session_id.clone(),
+                                    live_stream_id: None,
+                                    playlist_length: item_duration_ticks,
+                                    playlist_index: Some(initial_queue_index as i32), // Use captured state
+                                    shuffle_mode: shuffle_mode.clone(),
+                                    now_playing_queue: queue_items.clone(), // Clone queue state
                                 };
-                                if tx.send(update).is_err() {
-                                    warn!("[Reporter] Update channel closed. Stopping reporter.");
-                                    break;
+                                let progress_report = PlaybackProgressReport { base: report_base };
+
+                                // Send report via HTTP POST
+                                match client.report_playback_progress(&progress_report).await {
+                                    Ok(_) => trace!("[Reporter] Reported progress successfully for item {}", initial_item_id),
+                                    Err(JellyfinError::Network(e)) if e.is_timeout() => {
+                                        warn!("[Reporter] Timeout reporting progress for item {}: {}", initial_item_id, e);
+                                        // Continue trying on next tick
+                                    }
+                                    Err(e) => {
+                                        error!("[Reporter] Failed to report progress for item {}: {}. Stopping reporter.", initial_item_id, e);
+                                        break; // Stop reporting on persistent errors
+                                    }
                                 }
                             } else {
                                 info!("[Reporter] Progress info dropped. Stopping reporter.");
@@ -292,19 +368,18 @@ impl Player {
                         }
                     }
                 }
-                info!("[Reporter] Progress reporter task stopped for item {}", initial_item_id);
+                info!("[Reporter] HTTP Progress reporter task stopped for item {}", initial_item_id);
             });
             Some(handle)
         } else {
-            warn!("[PLAYER] Cannot start progress reporter: update sender not configured.");
+            warn!("[PLAYER] Cannot start progress reporter: Jellyfin client not configured.");
             None
         };
         self.reporter_task_handle = reporter_handle;
 
 
-        // --- Finalize State ---
-        // Set current item *after* potentially stopping old playback and spawning new tasks
-        self.set_current_item(&item_to_play); // This sends the PlaybackStart update
+        // --- Finalize State (already set earlier) ---
+        // self.set_current_item(&item_to_play); // Removed: State set before reporting start
     }
 
     pub async fn play_pause(&mut self) {
@@ -425,30 +500,68 @@ impl Player {
 
         let stopped_item_id = self.current_item_id.clone();
         // Get final position from shared state if possible, otherwise use last known
-        let final_ticks = self.current_progress.as_ref()
-            .and_then(|p| p.lock().ok())
-            .map(|p_info| (p_info.current_seconds * 10_000_000.0) as i64)
-            .unwrap_or(self.position_ticks);
+        let final_ticks = if let Some(progress_arc) = self.current_progress.as_ref() {
+            let p_info = progress_arc.lock().await; // Lock the async mutex
+            (p_info.current_seconds * 10_000_000.0) as i64 // Calculate ticks from locked info
+        } else {
+            self.position_ticks // Fallback if progress info is None
+        };
 
+let stopped_item_id_clone = stopped_item_id.clone(); // Clone for reporting
 
-        // Stop background tasks
-        self.stop_playback_tasks().await;
+// Stop background tasks
+self.stop_playback_tasks().await;
 
-        // Update state *after* stopping tasks
-        self.is_playing = false;
-        self.is_paused = false;
-        self.current_item_id = None;
-        self.position_ticks = 0; // Reset position after stopping
+// --- Report Playback Stopped via HTTP POST ---
+if let (Some(client), Some(id)) = (&self.jellyfin_client, stopped_item_id_clone) {
+     let session_id = client.play_session_id().to_string();
+     let queue_items: Vec<QueueItem> = self.queue.iter().enumerate().map(|(idx, item)| QueueItem {
+         id: item.id.clone(),
+         playlist_item_id: format!("playlistItem{}", idx),
+     }).collect();
 
-        // Send Stopped update
-        if let Some(id) = stopped_item_id {
-            self.send_update(PlayerStateUpdate::Stopped {
-                item_id: id,
-                final_position_ticks: final_ticks,
-            });
-        }
-    }
+     // Need to capture state *before* clearing it below
+     let report_base = PlaybackReportBase {
+         queueable_media_types: vec!["Audio".to_string()],
+         can_seek: true,
+         item_id: id.clone(),
+         media_source_id: id.clone(),
+         position_ticks: final_ticks, // Use final position
+         volume_level: self.volume,
+         is_paused: false, // Stopped means not paused
+         is_muted: self.is_muted,
+         play_method: "DirectPlay".to_string(),
+         play_session_id: session_id,
+         live_stream_id: None,
+         // Find the original item to get its duration for playlist_length
+         playlist_length: self.queue.iter().find(|item| item.id == id).and_then(|item| item.run_time_ticks).unwrap_or(0),
+         playlist_index: Some(self.current_queue_index as i32), // Index might be inaccurate if queue changed, but best effort
+         shuffle_mode: "Sorted".to_string(), // TODO: Add shuffle state
+         now_playing_queue: queue_items,
+     };
 
+     let stop_report = PlaybackStopReport {
+         base: report_base,
+         playback_stopped_info: PlaybackStoppedInfoInner {
+             played_to_completion: false, // Explicit stop is not completion
+         },
+     };
+
+     match client.report_playback_stopped(&stop_report).await {
+         Ok(_) => info!("[PLAYER] Reported playback stopped successfully for item {}", id),
+         Err(e) => error!("[PLAYER] Failed to report playback stopped for item {}: {}", id, e),
+     }
+} else {
+     error!("[PLAYER] Cannot report playback stopped: Jellyfin client or Item ID not available.");
+}
+
+// Update state *after* stopping tasks and reporting
+self.is_playing = false;
+self.is_paused = false;
+self.current_item_id = None;
+self.position_ticks = 0; // Reset position after stopping
+
+}
     pub async fn next(&mut self) {
         if self.queue.is_empty() {
             warn!("[PLAYER] Queue is empty, cannot skip to next item");
@@ -519,4 +632,41 @@ impl Player {
         }
         // TODO: Implement actual ALSA seek functionality
     }
-}
+
+
+    /// Performs graceful shutdown of the Player and its components.
+    /// This includes stopping background tasks and shutting down the audio player.
+    pub async fn shutdown(&mut self) {
+        info!("[PLAYER] Initiating shutdown...");
+
+        // 1. Stop background tasks (playback and reporter)
+        self.stop_playback_tasks().await;
+
+        // 2. Shutdown the PlaybackOrchestrator
+        if let Some(alsa_player_arc) = self.alsa_player.take() { // Take ownership
+            info!("[PLAYER] Shutting down PlaybackOrchestrator...");
+            let mut player_guard = alsa_player_arc.lock().await;
+            if let Err(e) = player_guard.shutdown().await {
+                error!("[PLAYER] Error during PlaybackOrchestrator shutdown: {}", e);
+            } else {
+                info!("[PLAYER] PlaybackOrchestrator shutdown complete.");
+            }
+            // Drop the guard explicitly
+            drop(player_guard);
+        } else {
+            info!("[PLAYER] No PlaybackOrchestrator instance to shut down.");
+        }
+
+        // 3. Clear remaining state (optional, as tasks are stopped)
+        self.is_playing = false;
+        self.is_paused = false;
+        self.current_item_id = None;
+        self.queue.clear();
+        self.current_queue_index = 0;
+
+        info!("[PLAYER] Shutdown complete.");
+    }
+
+    }
+
+

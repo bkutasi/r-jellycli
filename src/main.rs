@@ -14,7 +14,6 @@ use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use log::info; // Added info log
-// Removed tokio::sync::Mutex import from here as it's imported above
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
@@ -37,9 +36,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             r.store(false, Ordering::SeqCst);
             
             let _ = shutdown_tx_clone.send(()); // Signal background tasks
-            // Removed the sleep and forced exit.
-            // Rely on the 'running' flag and shutdown signal for graceful termination
-            // in the main loop and background tasks.
         }
     });
 
@@ -234,18 +230,27 @@ let mut jellyfin = JellyfinClient::new(&settings.server_url);
     // --- Initialize Jellyfin Session and Link Player ---
     // This internally calls report_capabilities and starts WebSocket listener
     info!("Initializing Jellyfin session...");
-    match jellyfin.initialize_session(settings.device_id.as_ref().unwrap(), running.clone()).await {
-        Ok(()) => {
-            info!("Session initialized successfully via REST. Attempting to link Player to WebSocket handler...");
-            // Now that session (and potentially WebSocket) is initialized, link the player
-            // This allows WebSocket handler to send commands TO the player
-            if let Err(e) = jellyfin.set_player(player.clone()).await {
-                 log::warn!("Failed to link Player to WebSocket handler (WebSocket might not be connected or handler missing): {}", e);
+    // 1. Initialize session (reports capabilities, connects WebSocket, creates handler)
+    if let Err(e) = jellyfin.initialize_session(settings.device_id.as_ref().unwrap(), running.clone()).await {
+        log::warn!("Failed to initialize session (capabilities report or WebSocket connect): {}. Client may not be visible or controllable.", e);
+        // Decide if this is fatal. For now, we continue but WS features might fail.
+    } else {
+        info!("Session initialized successfully (capabilities reported, WebSocket connected).");
+
+        // 2. Set the Player instance on the WebSocket handler
+        if let Err(e) = jellyfin.set_player(player.clone()).await {
+            log::warn!("Failed to link Player to WebSocket handler (handler might be missing if WS connection failed): {}", e);
+        } else {
+            info!("Successfully linked Player to WebSocket handler.");
+
+            // 3. Start the WebSocket listener task
+            if let Err(e) = jellyfin.start_websocket_listener(running.clone()).await {
+                 log::error!("Failed to start WebSocket listener task: {}", e);
+                 // This is likely a significant issue, consider if the app should exit.
             } else {
-                 info!("Successfully linked Player to WebSocket handler.");
+                 info!("WebSocket listener task started successfully.");
             }
-        },
-        Err(e) => log::warn!("Failed to initialize session (capabilities report or WebSocket connect): {}. Client may not be visible or controllable.", e),
+        }
     }
     
     // Check if we're in test mode (just testing authentication)
@@ -500,22 +505,28 @@ enum SelectionOutcome {
     }
     
     // --- Shutdown ---
-    println!("Main loop exited. Waiting for background tasks to finish...");
+    println!("Main loop exited. Initiating graceful shutdown...");
 
-    // The 'task_handles' variable was not defined, suggesting this loop
-    // might be leftover from a previous implementation. Removing it.
-    // If specific progress tasks need joining, their handles should be collected.
-    // println!("Progress tasks finished."); // Removed corresponding message
-    // Wait for the WebSocket listener task to complete
-    if let Some(ws_handle) = jellyfin.take_websocket_handle().await { // Added .await
+    // --- Player Shutdown ---
+    // Explicitly shut down the player first, which handles its own tasks and the audio orchestrator.
+    println!("Shutting down player components...");
+    { // Scope for player lock
+        let mut player_guard = player.lock().await;
+        player_guard.shutdown().await; // Call the new shutdown method
+    }
+    println!("Player components shut down.");
+
+    // --- WebSocket Listener Shutdown ---
+    // Now wait for the WebSocket listener task (if it was started)
+    if let Some(ws_handle) = jellyfin.take_websocket_handle().await {
         println!("Waiting for WebSocket listener task to finish...");
         if let Err(e) = ws_handle.await {
-            println!("Error waiting for WebSocket listener task: {:?}", e);
+            error!("Error waiting for WebSocket listener task: {:?}", e); // Use error log level
         } else {
-            println!("WebSocket listener task finished successfully.");
+            info!("WebSocket listener task finished successfully."); // Use info log level
         }
     } else {
-        println!("No WebSocket listener handle found to await.");
+        info!("No WebSocket listener handle found to await (might not have started)."); // Use info log level
     }
 
     println!("All tasks finished. Exiting application.");

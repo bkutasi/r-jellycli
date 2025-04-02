@@ -12,10 +12,11 @@ pub enum AudioError {
     IoError(io::Error),
     NetworkError(reqwest::Error),
     InvalidState(String), // Changed to accept owned String
-    UnsupportedFormat(&'static str),
+    UnsupportedFormat(String), // Changed to accept owned String
     MissingCodecParams(&'static str),
     TaskJoinError(String),
     InitializationError(String),
+    PlaybackError(String), // Added for general playback issues
 }
 
 impl std::fmt::Display for AudioError {
@@ -32,6 +33,7 @@ impl std::fmt::Display for AudioError {
             AudioError::MissingCodecParams(s) => write!(f, "Missing codec parameters: {}", s),
             AudioError::TaskJoinError(e) => write!(f, "Async task join error: {}", e),
             AudioError::InitializationError(e) => write!(f, "Initialization error: {}", e),
+            AudioError::PlaybackError(e) => write!(f, "Playback error: {}", e), // Added display for PlaybackError
         }
     }
 }

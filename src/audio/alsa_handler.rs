@@ -13,7 +13,8 @@ const LOG_TARGET: &str = "r_jellycli::audio::alsa_handler";
 pub struct AlsaPcmHandler {
     device_name: String,
     pcm: Option<PCM>,
-    audio_spec: Option<SignalSpec>, // Store the spec used for initialization
+    requested_spec: Option<SignalSpec>, // Store the spec requested for initialization
+    actual_rate: Option<u32>,      // Store the actual rate negotiated by ALSA
 }
 
 impl AlsaPcmHandler {
@@ -23,7 +24,8 @@ impl AlsaPcmHandler {
         AlsaPcmHandler {
             device_name: device_name.to_string(),
             pcm: None,
-            audio_spec: None,
+            requested_spec: None,
+            actual_rate: None,
         }
     }
 
@@ -59,10 +61,12 @@ impl AlsaPcmHandler {
                             "ALSA rate negotiation: requested={}, actual={}",
                             spec.rate, actual_rate
                         );
-                        // Note: We don't update the spec here, assuming the caller manages the target spec.
-                        // The conversion process should still target the original spec rate.
+                        // Store the actual rate
+                        self.actual_rate = Some(actual_rate);
                     } else {
                         debug!(target: LOG_TARGET, "ALSA rate set successfully to {}", actual_rate);
+                        // Store the actual rate even if it matches
+                        self.actual_rate = Some(actual_rate);
                     }
                 }
                 Err(e) => {
@@ -87,7 +91,7 @@ impl AlsaPcmHandler {
         }
 
         self.pcm = Some(pcm);
-        self.audio_spec = Some(spec); // Store the spec used
+        self.requested_spec = Some(spec); // Store the requested spec
         info!(target: LOG_TARGET, "ALSA initialized successfully.");
         Ok(())
     }
@@ -161,12 +165,18 @@ impl AlsaPcmHandler {
             // PCM is dropped here, closing the device
             debug!(target: LOG_TARGET, "ALSA PCM closed.");
         }
-        self.audio_spec = None; // Clear stored spec
+        self.requested_spec = None; // Clear stored spec
+        self.actual_rate = None; // Clear actual rate
     }
 
     /// Returns the current state of the PCM device.
     pub fn state(&self) -> PcmState {
         self.pcm.as_ref().map_or(PcmState::Open, |p| p.state())
+    }
+
+    /// Returns the actual sample rate negotiated with ALSA during initialization.
+    pub fn get_actual_rate(&self) -> Option<u32> {
+        self.actual_rate
     }
 }
 

@@ -1,7 +1,7 @@
 //! Handles the WebSocket connection to the Jellyfin server for real-time communication.
 //! Manages sending player state updates and receiving remote control commands.
 
-use crate::jellyfin::models_playback::{PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo};
+// Removed unused imports: PlaybackStartReport, PlaybackStopReport
 use crate::jellyfin::models_playback::{GeneralCommand, PlayCommand, PlayStateCommand}; // Import directly
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, trace, warn};
@@ -132,6 +132,11 @@ impl WebSocketHandler {
         }
     }
 
+    /// Checks if the Player instance has been set.
+    pub fn is_player_set(&self) -> bool {
+        self.player.is_some()
+    }
+
     /// Sets the sender part of the MPSC channel for player state updates.
     /// This is typically called internally during `prepare_for_listening`.
     fn set_player_update_tx(&mut self, tx: mpsc::UnboundedSender<PlayerStateUpdate>) {
@@ -194,6 +199,7 @@ impl WebSocketHandler {
         Ok(())
     }
 
+
     /// Prepares the handler for the listening loop by creating the MPSC channel
     /// and returning a `PreparedWebSocketHandler` which owns the stream and channel receiver.
     pub fn prepare_for_listening(
@@ -214,7 +220,7 @@ impl WebSocketHandler {
 
         // If player instance already exists, update its sender immediately
         if let Some(player_arc) = &self.player {
-            let player_clone = Arc::clone(player_arc);
+            let player_clone: Arc<Mutex<Player>> = Arc::clone(player_arc); // <<< Added type annotation here
             // Spawn task to update the player instance asynchronously
             tokio::spawn(async move {
                 let mut player_guard = player_clone.lock().await;
@@ -233,8 +239,9 @@ impl WebSocketHandler {
             jellyfin_client: self.jellyfin_client.clone(),
             player_update_rx: rx, // Pass the receiver
         })
+
     }
-}
+} // End of impl WebSocketHandler
 
 // --- Active WebSocket Listener ---
 
@@ -452,74 +459,20 @@ impl PreparedWebSocketHandler {
 
         match update {
             PlayerStateUpdate::Started { item } => {
-                // Prefix unused variables with underscore
-                let (_vol, _muted, _paused) = if let Some(player_arc) = &self.player {
-                    let guard = player_arc.lock().await;
-                    (guard.get_volume(), guard.is_muted(), guard.is_paused())
-                    // Guard dropped here
-                } else {
-                    warn!("[WS Update] Player instance not available for Started update state fetch.");
-                    (100, false, false) // Default values
-                };
-
-                // Construct PlaybackStartInfo using fields from models_playback.rs
-                let session_id = self.jellyfin_client.play_session_id(); // Assuming getter exists
-                let data = PlaybackStartInfo {
-                    item_id: item.id.clone(),
-                    session_id: session_id.to_string(), // Convert &str to String
-                    play_session_id: session_id.to_string(), // Convert &str to String
-                    play_method: "DirectPlay".to_string(),
-                };
-                self.send_ws_message("PlaybackStart", data).await?;
+                // PlaybackStart is now reported via HTTP POST in Player::play_current_queue_item
+                debug!("[WS Update] Received PlayerStateUpdate::Started for item {}. (Reporting handled via HTTP POST)", item.id);
+                // No WebSocket message needed here anymore.
             }
-            PlayerStateUpdate::Stopped { item_id, final_position_ticks } => {
-                // Construct PlaybackStopInfo using fields from models_playback.rs
-                let session_id = self.jellyfin_client.play_session_id(); // Assuming getter exists
-                let data = PlaybackStopInfo {
-                    item_id,
-                    position_ticks: final_position_ticks,
-                    session_id: session_id.to_string(), // Convert &str to String
-                    play_session_id: session_id.to_string(), // Convert &str to String
-                };
-                self.send_ws_message("PlaybackStopped", data).await?;
+            PlayerStateUpdate::Stopped { item_id, final_position_ticks: _ } => { // Ignore unused field
+                // PlaybackStopped is now reported via HTTP POST in Player::stop
+                debug!("[WS Update] Received PlayerStateUpdate::Stopped for item {}. (Reporting handled via HTTP POST)", item_id);
+                // No WebSocket message needed here anymore.
             }
-            PlayerStateUpdate::Progress { item_id, position_ticks, .. } => {
-                // Fetch current state directly from the Player instance
-                let (current_is_paused, current_volume, current_is_muted) = if let Some(player_arc) = &self.player {
-                    let guard = player_arc.lock().await;
-                    (guard.is_paused(), guard.get_volume(), guard.is_muted())
-                    // Guard dropped here
-                } else {
-                    warn!("[WS Update] Player instance not available for Progress update state fetch.");
-                    (false, 100, false) // Default values
-                };
-
-                // Construct PlaybackProgressInfo using fields from models_playback.rs
-                 let session_id = self.jellyfin_client.play_session_id(); // Assuming getter exists
-                 let data = PlaybackProgressInfo {
-                    item_id,
-                    session_id: session_id.to_string(), // Convert &str to String
-                    position_ticks,
-                    is_paused: current_is_paused,
-                    is_playing: !current_is_paused, // Derive from is_paused
-                    play_method: "DirectPlay".to_string(),
-                    repeat_mode: "RepeatNone".to_string(), // Default
-                    shuffle_mode: "Sorted".to_string(), // Default
-                    is_muted: current_is_muted,
-                    volume_level: current_volume,
-                    audio_stream_index: Some(0), // Default, might need actual value later
-                    can_seek: true, // Assuming seek is generally possible
-                    playlist_item_id: None, // Default
-                    playlist_index: None, // Default
-                    playlist_length: None, // Default
-                    subtitle_stream_index: None, // Default
-                    media_source_id: None, // Added missing field
-            }; // Close PlaybackProgressInfo struct initialization
-            
-            // Send the constructed progress data directly within the Progress arm
-            // Removed incorrect inner `match msg` block
-            self.send_ws_message("PlaybackProgress", data).await?; // Corrected method name
-            } // Close PlayerStateUpdate::Progress arm
+            PlayerStateUpdate::Progress { item_id, position_ticks: _, .. } => { // Ignore unused field
+                 // PlaybackProgress is now reported via HTTP POST by the reporter task in Player::play_current_queue_item
+                 trace!("[WS Update] Received PlayerStateUpdate::Progress for item {}. (Reporting handled via HTTP POST)", item_id);
+                 // No WebSocket message needed here anymore.
+            }
             PlayerStateUpdate::VolumeChanged { volume, is_muted } => {
                 // Volume/Mute changes are implicitly included in the periodic Progress updates.
                 // We could optionally send an immediate UserDataChanged message here if needed,
@@ -535,20 +488,7 @@ impl PreparedWebSocketHandler {
         Ok(())
     }
 
-    /// Sends a structured message over the WebSocket.
-    async fn send_ws_message<T: Serialize>(&mut self, message_type: &str, data: T) -> Result<(), Box<dyn std::error::Error>> {
-        let outgoing_message = OutgoingWsMessage {
-            message_type: message_type.to_string(),
-            data,
-        };
-        let json_payload = serde_json::to_string(&outgoing_message)?;
-
-        debug!("[WS Send] Sending '{}' message type.", message_type);
-        trace!("[WS Send] Payload: {}", json_payload); // Log full payload only at trace level
-
-        self.websocket.send(Message::Text(json_payload)).await?;
-        Ok(())
-    }
+    // Removed unused send_ws_message function (likely obsolete after reporting moved to HTTP)
 
     /// Sends a WebSocket Ping message to keep the connection alive.
     async fn send_keep_alive_ping(&mut self) -> Result<(), Box<dyn std::error::Error>> {

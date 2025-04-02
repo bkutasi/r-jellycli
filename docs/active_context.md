@@ -1,15 +1,14 @@
 # Active Development Context
 
-**Current Focus**: Jellyfin Remote Control Integration and Session Visibility
+**Current Focus**: Stabilizing Audio Playback and Documentation Update
 
 **Status**:
-- ✅ **Audio Playback Fixes**
-  - Implemented support for multiple audio formats (S16, F32, U8, S24, S32)
-  - Fixed format conversion using proper Symphonia API methods
-  - Added graceful fallback for unsupported formats
-  - Configured ALSA for proper integration with CamillaDSP (`hw:Loopback,0,0`)
-  - Fixed "Resource busy" issues with proper device selection
-  - Documented ALSA configuration options in the README
+- ✅ **Audio Playback Functional**
+  - Switched playback reporting from WebSocket to HTTP POST (resolving server errors).
+  - Implemented audio resampling using `rubato` to handle sample rate mismatches.
+  - Corrected ALSA underrun (EPIPE) handling to retry writes instead of skipping data.
+  - Confirmed playback pipeline (decode, resample, write) is functional.
+  - Confirmed lack of audible sound with `hw:Loopback,0,0` is expected behavior (requires external routing), not an application bug.
 
 - ✅ **Documentation Updates**
   - Updated README with ALSA configuration details
@@ -18,10 +17,9 @@
   - Added error handling patterns for thread-safe operation
 
 - ✅ **User Experience Improvements**
-  - Implemented clean exit handling with Ctrl+C support
-  - Added exit functionality at all navigation points
-  - Fixed signal handling to ensure graceful shutdown
-  - Ensured background tasks are properly terminated during exit
+  - Implemented clean exit handling with Ctrl+C support.
+  - Refactored cleanup into `async fn shutdown` in `Player`/`PlaybackOrchestrator` to prevent panics in `Drop` related to blocking operations.
+  - Application exits cleanly without panics.
 
 - ✅ **Jellyfin Remote Control Integration & Stable WebSocket**
   - Implemented proper client capability reporting format.
@@ -42,12 +40,11 @@
 - ✅ **Blockers Resolved**
   - The previous blocker regarding client visibility in the "Play On" menu is resolved due to the stable WebSocket connection.
 
-- ✅ **Jellyfin Remote Control State Reporting**
-  - Implemented state reporting (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) from `Player` -> `WebSocketHandler` -> Jellyfin Server.
-  - Utilized Tokio MPSC channel (`PlayerStateUpdate`) for communication between `Player` and `WebSocketHandler`.
-  - Used shared state (`Arc<StdMutex<PlaybackProgressInfo>>`) for `AlsaPlayer` to report playback time to `Player`.
-  - Refactored `Player` to manage background tasks for playback and progress reporting.
-  - Code compiles, but requires testing to confirm UI visibility and control in Jellyfin Web UI.
+- ✅ **Jellyfin Remote Control State Reporting (via HTTP POST)**
+  - Implemented state reporting (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) from `Player` directly to Jellyfin Server via HTTP POST requests.
+  - Used shared state (`Arc<StdMutex<PlaybackProgressInfo>>`) for `AlsaPlayer` to report playback time to `Player`'s reporting task.
+  - Refactored `Player` to manage background tasks for playback and HTTP reporting.
+  - Reporting mechanism is functional.
 
 
 - ✅ **Core Component Refactoring**
@@ -56,8 +53,14 @@
   - Refactored `src/audio/playback.rs`: Decomposed into smaller, focused modules within `src/audio/` (`decoder.rs`, `alsa_handler.rs`, `stream_wrapper.rs`, `format_converter.rs`, `progress.rs`, `error.rs`) to enhance maintainability and clarity. The main `playback.rs` now orchestrates these components.
   - **Goal**: Improve modularity, maintainability, testability, and logging across core components.
   - **Outcome**: Cleaner code structure, better separation of responsibilities, new files created as listed above.
+**Current State Summary**:
+- Audio playback pipeline (decoding, resampling, ALSA writing) is functional.
+- Playback state reporting via HTTP POST is functional.
+- Application exits cleanly.
+- Lack of sound on `hw:Loopback,0,0` is confirmed as expected external configuration need.
+
 **Next Steps**:
-1.  **Test State Reporting**: Verify that the client's playback state (start, stop, progress) is correctly reflected in the Jellyfin Web UI and that basic remote control commands (like stop) work.
-2.  **Implement Remaining Playback Controls**: Add ALSA-level implementation for pause, seek, and volume control, and integrate them with the `Player` and WebSocket communication.
-3.  **Address Other High-Priority Tasks**: Continue with tasks like real streaming/decoding improvements as per `docs/tasks_plan.md`.
-4.  **Refine Documentation**: Update documentation based on testing results and further implementation.
+1.  **Implement Remaining Playback Controls**: Add ALSA-level implementation for pause, seek, and volume control, and integrate them with the `Player` and HTTP/WebSocket communication as needed.
+2.  **Refine Buffering/Error Handling**: Improve robustness of the audio streaming and playback pipeline.
+3.  **Address Other Tasks**: Continue with tasks as per `docs/tasks_plan.md`.
+4.  **Update Documentation**: Ensure all documentation reflects the current state (This task).

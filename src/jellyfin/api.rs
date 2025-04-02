@@ -1,5 +1,8 @@
 //! Jellyfin API client implementation
 
+use crate::jellyfin::{PlaybackStartReport, PlaybackProgressReport, PlaybackStopReport};
+use serde::Serialize;
+
 use crate::jellyfin::models::{ItemsResponse, MediaItem, AuthResponse};
 use crate::jellyfin::session::SessionManager;
 use crate::jellyfin::WebSocketHandler;
@@ -169,7 +172,7 @@ impl JellyfinClient {
     async fn _post_empty(&self, path: &str, expected_status: StatusCode) -> Result<(), JellyfinError> {
         let (api_key, _) = self.ensure_authenticated()?;
         let url = self.build_url(path);
-        log::debug!("Sending POST request to: {}", url);
+        log::debug!("Sending empty POST request to: {}", url);
 
         let response = self.client
             .post(&url)
@@ -178,12 +181,12 @@ impl JellyfinClient {
             .await?;
 
         if response.status() == expected_status {
-            log::debug!("POST request successful with status: {}", expected_status);
+            log::debug!("Empty POST request successful with status: {}", expected_status);
             Ok(())
         } else {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| "Failed to read error body".to_string());
-            log::error!("POST request failed. Status: {}, Body: {}", status, error_text);
+            log::error!("Empty POST request failed. Status: {}, Body: {}", status, error_text);
             Err(JellyfinError::InvalidResponse(format!(
                 "Unexpected status code {} (expected {}). Body: {}",
                 status, expected_status, error_text
@@ -191,7 +194,36 @@ impl JellyfinClient {
         }
     }
 
+    /// Sends a POST request with a JSON body and expects a 204 No Content on success.
+    async fn _post_json_no_content<T: Serialize>(&self, path: &str, body: &T) -> Result<(), JellyfinError> {
+        let (api_key, _) = self.ensure_authenticated()?;
+        let url = self.build_url(path);
+        log::debug!("Sending POST request with JSON body to: {}", url);
 
+        let response = self.client
+            .post(&url)
+            .header("X-Emby-Token", api_key)
+            .json(body) // Automatically sets Content-Type: application/json
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status == StatusCode::NO_CONTENT {
+            log::debug!("POST request successful with status: {}", status);
+            Ok(())
+        } else {
+            let error_text = response.text().await.unwrap_or_else(|_| "Failed to read error body".to_string());
+            log::error!("POST request failed. Status: {}, Body: {}", status, error_text);
+             match status {
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(JellyfinError::Authentication(format!("Authentication failed ({}): {}", status, error_text))),
+                StatusCode::NOT_FOUND => Err(JellyfinError::NotFound(format!("Endpoint not found ({}): {}", status, error_text))),
+                _ => Err(JellyfinError::InvalidResponse(format!(
+                    "Unexpected status code {} (expected 204 No Content). Body: {}",
+                    status, error_text
+                ))),
+            }
+        }
+    }
     /// Handles response status checking and JSON deserialization.
     async fn _handle_response<T: DeserializeOwned>(response: Response) -> Result<T, JellyfinError> {
         let status = response.status();
@@ -251,7 +283,7 @@ impl JellyfinClient {
         &mut self,
         api_key: &str,
         device_id: &str,
-        shutdown_signal: Arc<AtomicBool>,
+        _shutdown_signal: Arc<AtomicBool>, // Prefixed as unused in this specific function
     ) -> Result<(), JellyfinError> {
         log::debug!("Initializing WebSocket handler with DeviceId: {}", device_id);
 
@@ -268,35 +300,8 @@ impl JellyfinClient {
                 let ws_handler_arc = Arc::new(Mutex::new(ws_handler));
                 self.websocket_handler = Some(ws_handler_arc.clone());
 
-                // Start WebSocket listener task
-                let shutdown = shutdown_signal.clone();
-                let task_ws_handler_arc = ws_handler_arc.clone(); // Clone Arc for the task
-                log::debug!("Spawning WebSocket listener task...");
-
-                let handle = tokio::spawn(async move {
-                    log::trace!("WebSocket listener task started execution.");
-                    let prepared_result = {
-                        let mut handler_guard = task_ws_handler_arc.lock().await;
-                        handler_guard.prepare_for_listening(shutdown.clone())
-                    }; // MutexGuard dropped
-
-                    if let Some(mut prepared_handler) = prepared_result {
-                        log::debug!("Prepared handler obtained, starting listen_for_commands loop...");
-                        if let Err(e) = prepared_handler.listen_for_commands().await {
-                            log::error!("WebSocket listener loop exited with error: {:?}", e);
-                        } else {
-                            log::debug!("WebSocket listener loop exited gracefully.");
-                        }
-                    } else {
-                        log::error!("Failed to obtain prepared handler for WebSocket listener (was it connected?).");
-                    }
-                    log::debug!("WebSocket listener task finished execution.");
-                });
-
-                // Store the handle
-                let mut handle_guard = self.websocket_listener_handle.lock().await;
-                *handle_guard = Some(handle);
-                log::debug!("WebSocket listener task handle stored.");
+                // Handler created and stored, listener task will be started separately
+                log::debug!("WebSocket handler created and stored. Listener task will be started later.");
                 Ok(())
             }
             Err(e) => {
@@ -413,70 +418,94 @@ impl JellyfinClient {
         Ok(url)
     }
 
-    /// Helper to delegate playback reporting to SessionManager
-    async fn _report_playback<F, Fut>(&self, action_name: &str, item_id: &str, operation: F) -> Result<(), JellyfinError>
-    where
-        F: FnOnce(SessionManager, String) -> Fut,
-        Fut: std::future::Future<Output = Result<(), ReqwestError>>, // Assuming SessionManager returns ReqwestError
-    {
-        log::debug!("Reporting playback {} for item_id: {}", action_name, item_id);
-        if let Some(sm) = self.session_manager.clone() { // Clone SessionManager for the async operation
-            match operation(sm, item_id.to_string()).await {
-                Ok(()) => {
-                    log::debug!("Playback {} reported successfully for item_id: {}", action_name, item_id);
-                    Ok(())
-                }
-                Err(e) => {
-                    log::error!("Error reporting playback {}: {:?}", action_name, e);
-                    Err(JellyfinError::Network(e)) // Map ReqwestError to JellyfinError::Network
-                }
-            }
-        } else {
-            log::warn!("Cannot report playback {} - session manager not initialized", action_name);
-            Err(JellyfinError::InvalidResponse("Session manager not initialized".to_string()))
-        }
+    // Removed incorrect _report_playback helper that delegated to SessionManager
+
+    /// Report playback started to Jellyfin server via HTTP POST.
+    pub async fn report_playback_start(&self, report: &PlaybackStartReport) -> Result<(), JellyfinError> {
+        log::info!("Reporting playback start for item_id: {}", report.base.item_id);
+        self._post_json_no_content("/Sessions/Playing", report).await
     }
 
-
-    /// Report playback progress to Jellyfin server
-    pub async fn report_playback_progress(
-        &self,
-        item_id: &str,
-        position_ticks: i64,
-        is_playing: bool,
-        is_paused: bool,
-    ) -> Result<(), JellyfinError> {
-        self._report_playback("progress", item_id, |sm, id| async move {
-            sm.report_playback_progress(&id, position_ticks, is_playing, is_paused).await
-        }).await
+    /// Report playback progress to Jellyfin server via HTTP POST.
+    pub async fn report_playback_progress(&self, report: &PlaybackProgressReport) -> Result<(), JellyfinError> {
+        // Avoid overly verbose logging for progress updates
+        log::trace!("Reporting playback progress for item_id: {}, PositionTicks: {}", report.base.item_id, report.base.position_ticks);
+        self._post_json_no_content("/Sessions/Playing/Progress", report).await
     }
 
-    /// Report playback started to Jellyfin server
-    pub async fn report_playback_start(&self, item_id: &str) -> Result<(), JellyfinError> {
-        self._report_playback("start", item_id, |sm, id| async move {
-            sm.report_playback_start(&id).await
-        }).await
+    /// Report playback stopped to Jellyfin server via HTTP POST.
+    pub async fn report_playback_stopped(&self, report: &PlaybackStopReport) -> Result<(), JellyfinError> {
+        log::info!("Reporting playback stopped for item_id: {}", report.base.item_id);
+        self._post_json_no_content("/Sessions/Playing/Stopped", report).await
     }
 
-    /// Report playback stopped to Jellyfin server
-    pub async fn report_playback_stopped(&self, item_id: &str, position_ticks: i64) -> Result<(), JellyfinError> {
-         self._report_playback("stopped", item_id, |sm, id| async move {
-            sm.report_playback_stopped(&id, position_ticks).await
-        }).await
-    }
-
-    /// Set the player instance for the WebSocket handler to control
+    /// Set the player instance for the WebSocket handler to control.
+    /// This should be called *before* `start_websocket_listener`.
     pub async fn set_player(&self, player: Arc<Mutex<Player>>) -> Result<(), JellyfinError> {
-        log::debug!("Setting player instance for WebSocket handler");
-        if let Some(websocket_handler) = &self.websocket_handler {
-            let mut handler = websocket_handler.lock().await;
-            handler.set_player(player);
-            log::debug!("Player instance set successfully");
+        log::debug!("Attempting to set player instance for WebSocket handler");
+        if let Some(websocket_handler_arc) = &self.websocket_handler {
+            let mut handler_guard = websocket_handler_arc.lock().await;
+            handler_guard.set_player(player);
+            log::info!("Player instance successfully set on WebSocket handler.");
             Ok(())
         } else {
-            log::warn!("Cannot set player - WebSocket handler not initialized");
-            Err(JellyfinError::WebSocketError("WebSocket handler not initialized".to_string()))
+            log::warn!("Cannot set player - WebSocket handler not initialized or already taken.");
+            Err(JellyfinError::WebSocketError("WebSocket handler not available to set player".to_string()))
         }
+    }
+
+    /// Spawns the WebSocket listener task.
+    /// Requires `initialize_session` and `set_player` to have been called successfully.
+    pub async fn start_websocket_listener(&mut self, shutdown_signal: Arc<AtomicBool>) -> Result<(), JellyfinError> {
+        log::info!("Attempting to start WebSocket listener task...");
+
+        let ws_handler_arc = match self.websocket_handler.clone() { // Clone Arc to move into task
+            Some(arc) => arc,
+            None => {
+                log::error!("Cannot start listener: WebSocket handler not initialized.");
+                return Err(JellyfinError::WebSocketError("WebSocket handler not initialized".to_string()));
+            }
+        };
+
+        // Check if player is set before spawning (optional but good practice)
+        {
+            let handler_guard = ws_handler_arc.lock().await;
+            if !handler_guard.is_player_set() { // Use the public accessor method
+                 log::warn!("Starting WebSocket listener, but Player instance was not set beforehand. Incoming commands requiring Player will fail.");
+            }
+        } // Lock released
+
+
+        let shutdown = shutdown_signal.clone();
+        log::debug!("Spawning WebSocket listener task...");
+
+        let handle = tokio::spawn(async move {
+            log::trace!("WebSocket listener task started execution.");
+            // Lock the handler Arc within the task to prepare and listen
+            let prepared_result = {
+                 let mut handler_guard = ws_handler_arc.lock().await;
+                 // Player should be set now before prepare_for_listening is called
+                 handler_guard.prepare_for_listening(shutdown.clone())
+            }; // MutexGuard dropped here
+
+            if let Some(mut prepared_handler) = prepared_result {
+                log::debug!("Prepared handler obtained, starting listen_for_commands loop...");
+                if let Err(e) = prepared_handler.listen_for_commands().await {
+                    log::error!("WebSocket listener loop exited with error: {:?}", e);
+                } else {
+                    log::debug!("WebSocket listener loop exited gracefully.");
+                }
+            } else {
+                log::error!("Failed to obtain prepared handler for WebSocket listener (was it connected?).");
+            }
+            log::debug!("WebSocket listener task finished execution.");
+        });
+
+        // Store the handle
+        let mut handle_guard = self.websocket_listener_handle.lock().await;
+        *handle_guard = Some(handle);
+        log::info!("WebSocket listener task spawned and handle stored.");
+        Ok(())
     }
 
     /// Take the JoinHandle for the WebSocket listener task, if it exists.

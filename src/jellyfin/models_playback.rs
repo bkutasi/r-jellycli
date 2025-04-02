@@ -3,142 +3,95 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Information for reporting playback progress
-#[derive(Serialize, Debug)]
-pub struct PlaybackProgressInfo {
-    #[serde(rename = "ItemId")]
-    pub item_id: String,
-    
-    #[serde(rename = "SessionId")]
-    pub session_id: String,
-    
-    #[serde(rename = "PositionTicks")]
-    pub position_ticks: i64,
-    
-    #[serde(rename = "IsPaused")]
-    pub is_paused: bool,
-    
-    #[serde(rename = "IsPlaying")]
-    pub is_playing: bool,
-    
-    #[serde(rename = "PlayMethod")]
-    pub play_method: String,
-    
-    #[serde(rename = "RepeatMode")]
-    pub repeat_mode: String,
-    
-    #[serde(rename = "ShuffleMode")]
-    pub shuffle_mode: String,
-    
-    #[serde(rename = "IsMuted")]
-    pub is_muted: bool,
-    
-    #[serde(rename = "VolumeLevel")]
-    pub volume_level: i32,
-    
-    #[serde(rename = "AudioStreamIndex")]
-    pub audio_stream_index: Option<i32>,
-    
-    // Add additional fields needed for proper remote control visibility
-    #[serde(rename = "CanSeek")]
+// --- Outgoing Playback Reporting Structures (for HTTP POST) ---
+
+/// Represents an item in the NowPlayingQueue.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct QueueItem {
+    pub id: String,
+    pub playlist_item_id: String, // Typically "playlistItem{index}"
+}
+
+/// Base structure for playback reporting (Start, Progress, Stop).
+/// Matches Go's `playbackStarted` struct used in POST requests.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackReportBase {
+    pub queueable_media_types: Vec<String>, // e.g., ["Audio"]
     pub can_seek: bool,
-    
-    #[serde(rename = "PlaylistItemId")]
-    pub playlist_item_id: Option<String>,
-    
-    #[serde(rename = "PlaylistIndex")]
-    pub playlist_index: Option<i32>,
-    
-    #[serde(rename = "PlaylistLength")]
-    pub playlist_length: Option<i32>,
-    
-    #[serde(rename = "SubtitleStreamIndex")]
-    pub subtitle_stream_index: Option<i32>,
-    
-    #[serde(rename = "MediaSourceId")]
-    pub media_source_id: Option<String>,
-}
-
-impl PlaybackProgressInfo {
-    /// Create a new playback progress info with default values
-    pub fn new(item_id: String, session_id: String, position_ticks: i64, is_playing: bool, is_paused: bool) -> Self {
-        PlaybackProgressInfo {
-            item_id,
-            session_id,
-            position_ticks,
-            is_paused,
-            is_playing,
-            play_method: "DirectPlay".to_string(),
-            repeat_mode: "RepeatNone".to_string(),
-            shuffle_mode: "Sorted".to_string(),
-            is_muted: false,
-            volume_level: 100,
-            audio_stream_index: Some(0),
-            can_seek: true,
-            playlist_item_id: None,
-            playlist_index: None,
-            playlist_length: None,
-            subtitle_stream_index: None,
-            media_source_id: None,
-        }
-    }
-}
-
-/// Information for reporting playback start
-#[derive(Serialize, Debug)]
-pub struct PlaybackStartInfo {
-    #[serde(rename = "ItemId")]
     pub item_id: String,
-    
-    #[serde(rename = "SessionId")]
-    pub session_id: String,
-    
-    #[serde(rename = "PlayMethod")]
-    pub play_method: String,
-    
-    #[serde(rename = "PlaySessionId")]
-    pub play_session_id: String,
-}
-
-impl PlaybackStartInfo {
-    /// Create a new playback start info with default values
-    pub fn new(item_id: String, session_id: String) -> Self {
-        PlaybackStartInfo {
-            item_id,
-            session_id: session_id.clone(),
-            play_method: "DirectPlay".to_string(),
-            play_session_id: session_id, // Use the same session ID for simplicity
-        }
-    }
-}
-
-/// Information for reporting playback stopped
-#[derive(Serialize, Debug)]
-pub struct PlaybackStopInfo {
-    #[serde(rename = "ItemId")]
-    pub item_id: String,
-    
-    #[serde(rename = "SessionId")]
-    pub session_id: String,
-    
-    #[serde(rename = "PositionTicks")]
+    pub media_source_id: String, // Often same as item_id
     pub position_ticks: i64,
-    
-    #[serde(rename = "PlaySessionId")]
+    pub volume_level: i32,
+    pub is_paused: bool,
+    pub is_muted: bool,
+    pub play_method: String, // e.g., "DirectPlay"
     pub play_session_id: String,
+    pub live_stream_id: Option<String>, // Go uses "", map to None or Some("")? Let's use Option<String>
+    pub playlist_length: i64, // Seems to be item duration in Go code
+    pub playlist_index: Option<i32>, // Added based on observation, might be needed
+    pub shuffle_mode: String, // "Shuffle" or "Sorted"
+    pub now_playing_queue: Vec<QueueItem>,
 }
 
-impl PlaybackStopInfo {
-    /// Create a new playback stop info
-    pub fn new(item_id: String, session_id: String, position_ticks: i64) -> Self {
-        PlaybackStopInfo {
-            item_id,
-            session_id: session_id.clone(),
-            position_ticks,
-            play_session_id: session_id, // Use the same session ID for simplicity
-        }
-    }
+/// Information specific to reporting playback stopped.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackStoppedInfoInner {
+    pub played_to_completion: bool,
 }
+
+/// Full payload for reporting playback stopped via POST /Sessions/Playing/Stopped.
+/// Matches Go's `playbackStopped` struct.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackStopReport {
+    #[serde(flatten)]
+    pub base: PlaybackReportBase,
+    pub playback_stopped_info: PlaybackStoppedInfoInner,
+}
+
+/// Full payload for reporting playback progress via POST /Sessions/Playing/Progress.
+/// Matches Go's `playbackProgress` struct (excluding the redundant 'Event' field).
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackProgressReport {
+     #[serde(flatten)]
+    pub base: PlaybackReportBase,
+    // Note: Go includes an 'Event' field here, but it seems redundant as the endpoint defines the event.
+    // We omit it unless testing shows it's required by the server.
+}
+
+/// Full payload for reporting playback start via POST /Sessions/Playing.
+/// Uses the base structure directly, matching Go's usage.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackStartReport {
+     #[serde(flatten)]
+    pub base: PlaybackReportBase,
+}
+
+// --- Structures for convenience (might be used internally before creating reports) ---
+
+/// Simplified info for internal state tracking or function arguments.
+#[derive(Debug, Clone)]
+pub struct PlaybackStateInfo {
+    pub item_id: String,
+    pub session_id: String, // This is the PlaySessionId for reporting
+    pub position_ticks: i64,
+    pub duration_ticks: i64, // Item duration
+    pub is_paused: bool,
+    pub is_muted: bool,
+    pub volume_level: i32,
+    pub is_shuffle: bool,
+    pub queue_ids: Vec<String>, // Just the IDs for easier handling
+    pub current_queue_index: Option<usize>, // Index within queue_ids
+    // Add other relevant state fields as needed
+}
+
+// Removed old PlaybackStartInfo struct and its impl
+// Removed old PlaybackStopInfo struct and its impl
 
 
 // --- Incoming WebSocket Command Structures ---

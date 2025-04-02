@@ -53,6 +53,11 @@
     *   The `Player` needs to manage background Tokio tasks for both audio playback and periodic progress reporting.
     *   Using broadcast channels for shutdown signals provides a clean way to terminate these tasks when playback stops or the application exits.
 
+        5.  **Reporting via HTTP POST (Resolution for WebSocket Errors)**:
+            *   **Problem**: Persistent `System.ArgumentOutOfRangeException` errors on the Jellyfin server side when receiving WebSocket messages like `PlaybackProgress`. The exact cause within the server's WebSocket handling remained elusive.
+            *   **Solution**: Switched playback reporting (`PlaybackStart`, `PlaybackProgress`, `PlaybackStop`) from WebSocket messages to direct HTTP POST requests to the corresponding REST API endpoints (`/Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`).
+            *   **Outcome**: This completely resolved the server-side exceptions and proved to be a more robust method for state reporting in this case.
+
 ## Implementation Patterns from jellycli (Go)
 
 1. **Device ID Generation**
@@ -69,6 +74,18 @@
 
 ## Technical Implementation Challenges
 
+## Audio Processing Lessons
+
+        1.  **Sample Rate Mismatches (Resampling)**:
+            *   **Problem**: Decoded audio stream's sample rate might not match the rate supported or configured for the ALSA output device, leading to playback speed issues or errors.
+            *   **Solution**: Integrated the `rubato` crate (v0.14) for high-quality asynchronous audio resampling. The `FormatConverter` (`src/audio/format_converter.rs`) now uses `rubato` to convert the sample rate of the decoded audio chunks to match the ALSA device's target rate before writing.
+            *   **Benefit**: Ensures correct playback speed regardless of source/sink rate differences.
+
+        2.  **ALSA Underrun (EPIPE) Handling**:
+            *   **Problem**: ALSA PCM writes can return an `EPIPE` (Broken pipe) error, indicating an underrun. The previous logic might incorrectly skip audio chunks after such a recoverable error.
+            *   **Solution**: Implemented proper handling in `_write_to_alsa` (`src/audio/playback.rs`). When a recoverable underrun (`EPIPE`) occurs, the code now calls `pcm.recover(err.errno(), true)` and *retries* the write operation for the *same* chunk instead of discarding it.
+            *   **Benefit**: Prevents audio data loss during recoverable underruns, leading to smoother playback.
+
 1. **Thread Safety Issues**
    - **Problem**: Box<dyn StdError> was not Send + Sync safe.
    - **Solution**: Properly wrapped errors in std::io::Error with string messages instead of passing raw dynamic error types.
@@ -81,6 +98,11 @@
    - **Problem**: Various unused variables in the session implementation.
    - **Solution**: Prefixed unused variables with underscores to maintain code clarity.
 
+
+        4. **Asynchronous Cleanup and `Drop` Trait Issues**:
+           *   **Problem**: Performing potentially blocking operations (like `blocking_lock()` on a `Mutex` or joining threads/tasks) within a `Drop` implementation for asynchronous structures (like `PlaybackOrchestrator` or `Player`) can lead to panics, especially when the Tokio runtime is shutting down. `Drop` is synchronous and doesn't integrate well with async cleanup needs.
+           *   **Solution**: Refactored cleanup logic into a dedicated `async fn shutdown(&mut self)` method within the relevant structs (`Player`, `PlaybackOrchestrator`). This method is called explicitly *before* the struct is dropped (e.g., before exiting `main`).
+           *   **Benefit**: Ensures graceful and non-blocking cleanup of resources (stopping tasks, releasing locks) within the async context, preventing shutdown panics.
 ## Failed Simplification Attempts
 
 1.  **Removing SSDP & Aligning with `jellycli-repo`**

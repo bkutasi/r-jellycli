@@ -1,5 +1,7 @@
 //! Jellyfin session management implementation
 
+// Removed unused import: PlaybackProgressInfo
+
 use reqwest::{Client, Error as ReqwestError};
 use log::debug;
 
@@ -9,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use serde_json;
 use hostname;
 
-use crate::jellyfin::{PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo};
+// Removed unused imports: PlaybackStartReport, PlaybackStopReport
 
 // Removed unused generate_device_id function.
 // Device ID is now handled in main.rs and passed into SessionManager::new.
@@ -140,117 +142,9 @@ impl SessionManager {
         self.device_id.clone()
     }
     
-    /// Report playback progress to Jellyfin server
-    pub async fn report_playback_progress(
-        &self,
-        item_id: &str,
-        position_ticks: i64,
-        is_playing: bool,
-        is_paused: bool
-    ) -> Result<(), ReqwestError> {
-        // TODO: Use the generated PlaySessionId here instead of the old session_id
-        // let session_id = self.play_session_id.clone(); // Placeholder for Step 3
-        let session_id = self.play_session_id.clone(); // Use the stored PlaySessionId
-            
-        println!("[SESSION] Reporting playback progress for item: {}", item_id);
-        println!("[SESSION] Position: {} ticks, Playing: {}, Paused: {}", position_ticks, is_playing, is_paused);
-        
-        let url = format!("{}/Sessions/Playing/Progress", self.server_url);
-            
-        let playback_request = PlaybackProgressInfo {
-            item_id: item_id.to_string(),
-            session_id,
-            position_ticks,
-            is_playing,
-            is_paused,
-            // Include required fields for remote control
-            play_method: "DirectPlay".to_string(),
-            repeat_mode: "RepeatNone".to_string(),
-            shuffle_mode: "Sorted".to_string(),
-            is_muted: false,
-            volume_level: 100,
-            audio_stream_index: Some(0),
-            // Additional fields for remote control functionality
-            can_seek: true,
-            playlist_item_id: None,
-            playlist_index: Some(0),
-            playlist_length: Some(1),
-            subtitle_stream_index: None,
-            media_source_id: Some(item_id.to_string()),
-        };
-        
-        self.client
-            .post(&url)
-            .header("X-Emby-Token", &self.api_key)
-            .json(&playback_request)
-            .send()
-            .await?
-            .error_for_status()?;
-            
-        println!("[SESSION] Playback progress reported successfully");
-        Ok(())
-    }
+    // Removed redundant report_playback_progress function. Reporting is handled by Player.
     
-    /// Report playback started to Jellyfin server
-    pub async fn report_playback_start(&self, item_id: &str) -> Result<(), ReqwestError> {
-        // TODO: Use the generated PlaySessionId here instead of the old session_id
-        // let session_id = self.play_session_id.clone(); // Placeholder for Step 3
-        let session_id = self.play_session_id.clone(); // Use the stored PlaySessionId
-
-        // if let Some(session_id) = self.get_session_id() { // Original check removed
-            println!("[SESSION] Reporting playback start for item: {}", item_id);
-
-            let url = format!("{}/Sessions/Playing", self.server_url);
-
-            let start_info = PlaybackStartInfo::new(
-                item_id.to_string(),
-                session_id // Use the placeholder ID
-            );
-        // } else {
-        //     println!("[SESSION] Warning: Cannot report playback start - no active session");
-        // }
-            
-            self.client
-                .post(&url)
-                .header("X-Emby-Token", &self.api_key)
-                .json(&start_info)
-                .send()
-                .await?
-                .error_for_status()?;
-                
-            println!("[SESSION] Playback start reported successfully");
-        Ok(())
-    }
+    // Removed redundant report_playback_start function. Reporting is handled by Player.
     
-    /// Report playback stopped to Jellyfin server
-    pub async fn report_playback_stopped(&self, item_id: &str, position_ticks: i64) -> Result<(), ReqwestError> {
-        // TODO: Use the generated PlaySessionId here instead of the old session_id
-        // let session_id = self.play_session_id.clone(); // Placeholder for Step 3
-        let session_id = self.play_session_id.clone(); // Use the stored PlaySessionId
-
-        // if let Some(session_id) = self.get_session_id() { // Original check removed
-            println!("[SESSION] Reporting playback stopped for item: {}", item_id);
-
-            let url = format!("{}/Sessions/Playing/Stopped", self.server_url);
-
-            let stop_info = PlaybackStopInfo::new(
-                item_id.to_string(),
-                session_id, // Use the placeholder ID
-                position_ticks
-            );
-        // } else {
-        //     println!("[SESSION] Warning: Cannot report playback stopped - no active session");
-        // }
-            
-            self.client
-                .post(&url)
-                .header("X-Emby-Token", &self.api_key)
-                .json(&stop_info)
-                .send()
-                .await?
-                .error_for_status()?;
-                
-            println!("[SESSION] Playback stopped reported successfully");
-        Ok(())
-    }
+    // Removed redundant report_playback_stopped function. Reporting is handled by Player.
 }

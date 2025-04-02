@@ -64,13 +64,13 @@ graph TD
   - Handling parent/child navigation
   - Streaming URL generation
   - Session management for remote control
-  - WebSocket communication for real-time updates and commands (receiving commands, sending state updates)
-  - Listens for `PlayerStateUpdate` messages via a channel to send `PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress` to the server.
+  - WebSocket communication for real-time updates and commands (receiving commands).
+  - **Note**: Playback state reporting (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) is now handled via direct HTTP POST requests to the server, not WebSocket messages.
 
 #### 3. Player Orchestrator & Playback Engine (`player` and `audio` modules)
 - **Responsibility**: Manages the overall playback lifecycle, coordinates audio output, and reports state back to the Jellyfin server.
 - **Implementation**:
-    - **`Player` (`src/player.rs`)**: Central orchestrator. Spawns and manages background tasks for audio playback and progress reporting. Communicates state changes (`PlayerStateUpdate`) via a Tokio MPSC channel to the `WebSocketHandler`. Uses broadcast channels for task shutdown.
+    - **`Player` (`src/player.rs`)**: Central orchestrator. Spawns and manages background tasks for audio playback and progress reporting. Communicates state changes directly to the Jellyfin server via HTTP POST requests. Uses broadcast channels for task shutdown. Includes an `async fn shutdown()` for graceful cleanup.
     - **`AlsaPlayer` (`src/audio/playback.rs`)**: Orchestrates audio playback using ALSA. It coordinates several sub-modules within `src/audio/`:
         - `decoder.rs`: Handles stream decoding using Symphonia.
         - `alsa_handler.rs`: Manages interaction with the ALSA PCM device.
@@ -85,7 +85,7 @@ graph TD
   - ALSA device setup and configuration.
   - Audio stream decoding and processing.
   - Playback lifecycle management (Start, Stop implemented; Pause, Seek, Volume TODO).
-  - Periodic progress reporting to Jellyfin server via WebSocket.
+  - Periodic progress reporting to Jellyfin server via HTTP POST requests.
 
 #### 4. Configuration Management (`config` module)
 - **Responsibility**: Managing user settings and application configuration
@@ -124,8 +124,8 @@ graph TD
 12. **Playback & State Reporting** →
     *   `Player` starts the `AlsaPlayer` task, which orchestrates decoding (`decoder.rs`), ALSA interaction (`alsa_handler.rs`), and streaming (`stream_wrapper.rs`, HTTP) for playback.
     *   `Player` starts a progress reporting task that reads time from the shared state managed by `progress.rs`.
-    *   `Player` sends `Start`, `Stop`, `Progress` updates via the `PlayerStateUpdate` channel.
-    *   `WebSocketHandler` receives channel updates and sends corresponding JSON messages (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) to the Jellyfin server.
+    *   `Player`'s background task reads time from the shared state managed by `progress.rs`.
+    *   `Player` sends `PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress` updates directly to the Jellyfin server via HTTP POST requests to `/Sessions/Playing`, `/Sessions/Playing/Stopped`, and `/Sessions/Playing/Progress` respectively.
 13. **Configuration Update** → Any new settings are saved back to config file on exit.
 
 ## Key Interfaces
@@ -170,10 +170,9 @@ graph TD
     - Runs independently, requires configuration (`DeviceId`).
     - Interacts with the network via UDP.
 
-5.  **`PlayerStateUpdate` Channel (Tokio MPSC)**
-    - **Purpose**: Communication channel from `Player` to `WebSocketHandler`.
-    - **Messages**: Enum (`PlayerStateUpdate`) indicating playback start, stop, progress, volume/mute changes.
-    - **Mechanism**: `Player` sends updates; `WebSocketHandler` receives and translates them into WebSocket messages for the Jellyfin server.
+5.  **Playback Reporting Mechanism (HTTP POST)**
+    - **Purpose**: Communication channel from `Player` to the Jellyfin Server for state updates.
+    - **Mechanism**: The `Player` component (specifically its progress reporting task) directly sends HTTP POST requests to the Jellyfin server endpoints (`/Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`) to report playback status. This replaces the previous WebSocket-based reporting.
 
 6.  **`PlaybackProgressInfo` Shared State (`Arc<StdMutex<...>>`)**
     - **Purpose**: Communication channel from the audio playback logic (`src/audio/progress.rs`) to `Player`'s progress reporting task.

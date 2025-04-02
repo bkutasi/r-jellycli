@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 use std::time::Duration as StdDuration;
 
 pub const PROGRESS_UPDATE_INTERVAL: StdDuration = StdDuration::from_millis(500);
@@ -12,6 +13,6 @@ pub struct PlaybackProgressInfo {
 }
 
 // Type alias for the shared progress tracker
-pub type SharedProgress = Arc<StdMutex<PlaybackProgressInfo>>;
+pub type SharedProgress = Arc<TokioMutex<PlaybackProgressInfo>>;
 
 // Potentially add helper functions here later if needed, e.g., for updating progress
