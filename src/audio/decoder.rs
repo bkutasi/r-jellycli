@@ -1,5 +1,6 @@
 use crate::audio::error::AudioError;
-use log::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn}; // Replaced log with tracing
+use tracing::instrument;
 use std::io;
 use symphonia::core::audio::AudioBufferRef;
 // Removed unused Signal import
@@ -77,6 +78,7 @@ pub enum DecodedBufferAndTimestamp {
 
 impl SymphoniaDecoder {
     /// Creates and initializes a new Symphonia decoder from a media source stream.
+    #[instrument(skip(mss), target = LOG_TARGET)] // Instrument the constructor, skip complex mss
     pub fn new(mss: MediaSourceStream) -> Result<Self, AudioError> { // Restore signature
         debug!(target: LOG_TARGET, "Setting up Symphonia format reader and decoder...");
         let hint = Hint::new();
@@ -225,6 +227,7 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
 
     /// Decodes the next available audio frame, returning an owned buffer variant.
     /// Handles reading packets, decoding, and potential errors or stream end.
+    #[instrument(skip(self, shutdown_rx), target = LOG_TARGET)] // Instrument the main decode function
     pub async fn decode_next_frame_owned( // Renamed function
         &mut self,
         shutdown_rx: &mut broadcast::Receiver<()>,

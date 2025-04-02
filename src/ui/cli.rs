@@ -50,9 +50,9 @@ impl Cli {
 
     /// Display a list of media items
     pub fn display_items(&self, items: &[MediaItem]) {
-        println!("\nAvailable Media Items:");
-        println!("{:<5} {:<30} {:<15} {}", "#", "Name", "Type", "ID");
-        println!("{}", "-".repeat(80));
+        eprintln!("\nAvailable Media Items:");
+        eprintln!("{:<5} {:<30} {:<15} {}", "#", "Name", "Type", "ID");
+        eprintln!("{}", "-".repeat(80));
         
         for (index, item) in items.iter().enumerate() {
             let name = if item.name.len() > 28 {
@@ -60,36 +60,16 @@ impl Cli {
             } else {
                 item.name.clone()
             };
-            println!("{:<5} {:<30} {:<15} {}", 
-                index + 1, 
+            eprintln!("{:<5} {:<30} {:<15} {}",
+                index + 1,
                 name,
                 item.media_type,
                 item.id
             );
         }
-        println!();
+        eprintln!();
     }
 
-    /// Prompt user to select a media item
-    pub fn select_item<'a>(&self, items: &'a [MediaItem]) -> Result<&'a MediaItem, Box<dyn Error>> {
-        if items.is_empty() {
-            return Err("No items available".into());
-        }
-        
-        print!("Enter the number of the item to select (1-{}): ", items.len());
-        io::stdout().flush()?;
-        
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        
-        let selection = input.trim().parse::<usize>()?;
-        if selection < 1 || selection > items.len() {
-            return Err(format!("Invalid selection. Please enter a number between 1 and {}", items.len()).into());
-        }
-        
-        Ok(&items[selection - 1])
-    }
-    
     /// Get username and password interactively if needed
     pub fn get_credentials(&self) -> Result<(String, String), Box<dyn Error>> {
         let username = match &self.args.username {
@@ -121,14 +101,13 @@ impl Cli {
     
     /// Display playback information
     pub fn display_playback_status(&self, item: &MediaItem) {
-        println!("\nNow playing: {}", item.name);
-        println!("Type: {}", item.media_type);
+        eprintln!("\nNow playing: {}", item.name);
+        eprintln!("Type: {}", item.media_type);
         
         if let Some(overview) = &item.overview {
-            println!("\nOverview: {}", overview);
+            eprintln!("\nOverview: {}", overview);
         }
         
-        println!("\nPress Ctrl+C to stop playback");
     }
     
     /// Display error messages

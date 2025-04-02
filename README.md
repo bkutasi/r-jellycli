@@ -68,10 +68,10 @@ cargo build --release
 
 ```bash
 # Run the client with a server URL and API key
-./target/release/r-jellycli --server-url "http://your-jellyfin-server:8096" --api-key "your-api-key"
+RUST_LOG=info ./target/release/r-jellycli --server-url "http://your-jellyfin-server:8096" --api-key "your-api-key"
 
 # Or use username/password authentication
-./target/release/r-jellycli --server-url "http://your-jellyfin-server:8096" --username "your-username" --password "your-password"
+RUST_LOG=info ./target/release/r-jellycli --server-url "http://your-jellyfin-server:8096" --username "your-username" --password "your-password"
 ```
 
 ### Configuration Options
@@ -105,7 +105,7 @@ When using with CamillaDSP or similar audio processing tools, set your ALSA devi
 
 ```bash
 # Example: Using with CamillaDSP on loopback device
-ALSA_DEVICE="hw:Loopback,0,0" cargo run --bin r-jellycli
+RUST_LOG=info ALSA_DEVICE="hw:Loopback,0,0" cargo run --bin r-jellycli
 ```
 
 #### Audio Format Support
@@ -154,6 +154,25 @@ The application stores configuration in `~/.config/jellycli/config.json` which c
 - ALSA device settings
 
 You can specify a custom configuration path with the `--config` option.
+
+
+## Logging
+
+This application uses the `tracing` framework for structured logging.
+
+- **Log Output:** Diagnostic logs are sent to `stdout`. User-facing status messages or UI elements are sent to `stderr`.
+- **Log Format:** Logs on `stdout` are human-readable, including timestamp, level, span(s), target module, and the message.
+- **Log Level Control:** Verbosity is controlled using the `RUST_LOG` environment variable. Examples:
+    - `RUST_LOG=info`: Show `info`, `warn`, and `error` level messages.
+    - `RUST_LOG=debug`: Show `debug` and higher level messages.
+    - `RUST_LOG=r_jellycli=trace`: Show `trace` and higher messages specifically from the `r_jellycli` crate.
+    - `RUST_LOG=info,r_jellycli::audio=debug`: Show `info` globally, but `debug` for the audio module.
+
+Set the `RUST_LOG` variable before running the application:
+
+```bash
+RUST_LOG=debug ./target/release/r-jellycli --server-url ...
+```
 
 ## Testing
 
@@ -236,4 +255,4 @@ Planned features:
 
 - Improved error handling
 - Fully functional remote client interaction ("Play On" visibility and command handling)
-- Better logging
+- Further logging improvements (e.g., file logging)

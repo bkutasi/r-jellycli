@@ -3,7 +3,8 @@ use alsa::pcm::{Access, Format, HwParams, State as PcmState, PCM};
 use alsa::{Direction, ValueOr};
 use alsa::nix::errno::Errno;
 use libc;
-use log::{debug, error, info, warn};
+use tracing::{debug, error, info, warn}; // Replaced log with tracing
+use tracing::instrument;
 use std::ffi::CString;
 use symphonia::core::audio::SignalSpec;
 
@@ -31,6 +32,7 @@ impl AlsaPcmHandler {
 
     /// Initializes the ALSA PCM device with the given specification.
     /// Closes any existing PCM device first.
+    #[instrument(skip(self, spec), fields(device = %self.device_name, rate = spec.rate, channels = spec.channels.count()))]
     pub fn initialize(&mut self, spec: SignalSpec) -> Result<(), AudioError> {
         info!(
             target: LOG_TARGET,
@@ -99,6 +101,7 @@ impl AlsaPcmHandler {
     /// Writes a buffer of S16LE interleaved samples, handling ALSA underruns.
     /// Returns Ok(frames_written) or Err on unrecoverable error.
     /// Note: Returns Ok(0) if an underrun occurred and was recovered.
+    #[instrument(skip(self, buffer), fields(frames = buffer.len() / self.requested_spec.map_or(2, |s| s.channels.count())))] // Calculate frames based on stored spec
     pub fn write_s16_buffer(&self, buffer: &[i16]) -> Result<usize, AudioError> {
         let pcm = self.pcm.as_ref().ok_or(AudioError::InvalidState("PCM not initialized for writing".to_string()))?;
         let io = pcm.io_i16()?;

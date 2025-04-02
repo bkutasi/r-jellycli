@@ -1,7 +1,8 @@
 use crate::audio::AudioError;
+
 use bytes::Bytes;
 use futures_util::StreamExt;
-use log::{debug, info, trace, error}; // Added error
+use tracing::{debug, info, trace, error}; // Added error
 use std::io::{self, Read, Seek, SeekFrom}; // Removed Cursor
 use symphonia::core::io::MediaSource;
 

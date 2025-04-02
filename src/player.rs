@@ -1,4 +1,4 @@
-use log::trace;
+// Removed log::trace import
 
 use std::sync::Arc; // Removed Mutex import from std::sync
 use std::time::Duration as StdDuration;
@@ -9,7 +9,8 @@ use crate::jellyfin::api::{JellyfinClient, JellyfinError}; // Import JellyfinErr
 use crate::jellyfin::models::MediaItem;
 use crate::jellyfin::{PlaybackStartReport, PlaybackStopReport, PlaybackReportBase, QueueItem, PlaybackStoppedInfoInner, PlaybackProgressReport}; // Use re-exported path
 use crate::jellyfin::websocket::PlayerStateUpdate; // Keep for potential UI updates
-use log::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, trace}; // Replaced log with tracing
+use tracing::instrument;
 
 // Player struct wraps the audio player and adds remote control capabilities
 pub struct Player {
@@ -38,6 +39,7 @@ pub struct Player {
 }
 
 impl Player {
+    #[instrument(skip_all)]
     pub fn new() -> Self {
         Player {
             alsa_player: None,
@@ -61,19 +63,20 @@ impl Player {
 
     // Method to set the Jellyfin client
     pub fn set_jellyfin_client(&mut self, client: JellyfinClient) {
-        info!("[PLAYER] Jellyfin client configured.");
+        info!("Jellyfin client configured.");
         self.jellyfin_client = Some(client);
     }
 
     // Keep set_alsa_player if needed for pre-creation, or remove if created on play
     pub fn set_alsa_player(&mut self, alsa_player: Arc<TokioMutex<PlaybackOrchestrator>>) { // Use TokioMutex
-        info!("[PLAYER] ALSA player instance set.");
+        info!("ALSA player instance set.");
         self.alsa_player = Some(alsa_player);
     }
 
     // Method to set the update sender
+    #[instrument(skip_all)]
     pub fn set_update_sender(&mut self, tx: mpsc::UnboundedSender<PlayerStateUpdate>) {
-        info!("[PLAYER] State update sender configured.");
+        info!("State update sender configured.");
         self.update_tx = Some(tx);
     }
 
@@ -122,8 +125,9 @@ impl Player {
     }
     // --- End Getter methods ---
 
+    #[instrument(skip(self))]
     pub async fn clear_queue(&mut self) {
-        info!("[PLAYER] Clearing playback queue");
+        info!("Clearing playback queue");
         self.queue.clear();
         self.current_queue_index = 0;
         self.current_item_id = None;
@@ -140,11 +144,11 @@ impl Player {
 
     pub fn add_items(&mut self, items: Vec<MediaItem>) {
         if items.is_empty() {
-            info!("[PLAYER] No items to add to queue");
+            info!("No items to add to queue");
             return;
         }
 
-        info!("[PLAYER] Adding {} items to the queue", items.len());
+        info!("Adding {} items to the queue", items.len());
         for item in &items {
             debug!("[PLAYER] - Added: {} ({})", item.name, item.id); // Use debug for item details
         }
@@ -152,6 +156,7 @@ impl Player {
         self.queue.extend(items);
     }
 
+    #[instrument(skip(self))]
     pub async fn play_from_start(&mut self) {
         if self.queue.is_empty() {
             warn!("[PLAYER] Cannot play, queue is empty");
@@ -162,6 +167,7 @@ impl Player {
         self.play_current_queue_item().await;
     }
 
+    #[instrument(skip(self), fields(queue_index = self.current_queue_index))]
     async fn play_current_queue_item(&mut self) {
         // --- Stop existing playback first ---
         self.stop_playback_tasks().await; // Stop previous tasks if any
@@ -173,7 +179,7 @@ impl Player {
         }
 
         let item_to_play = self.queue[self.current_queue_index].clone();
-        info!("[PLAYER] Preparing to play: {} ({})", item_to_play.name, item_to_play.id);
+        info!("Preparing to play: {} ({})", item_to_play.name, item_to_play.id);
 
         // --- Update Player State Immediately ---
         // Set state *before* getting URL or reporting start
@@ -232,7 +238,7 @@ impl Player {
             let start_report = PlaybackStartReport { base: report_base };
 
             match client.report_playback_start(&start_report).await {
-                Ok(_) => info!("[PLAYER] Reported playback start successfully for item {}", item_to_play.id),
+                Ok(_) => info!("Reported playback start successfully for item {}", item_to_play.id),
                 Err(e) => error!("[PLAYER] Failed to report playback start for item {}: {}", item_to_play.id, e),
             }
         } else {
@@ -278,7 +284,7 @@ impl Player {
             player_guard.stream_decode_and_play(&stream_url, item_to_play.run_time_ticks, playback_shutdown_rx).await
         });
         self.playback_task_handle = Some(playback_handle);
-        info!("[PLAYER] Spawned playback task.");
+        info!("Spawned playback task.");
 
 
         // --- Spawn Progress Reporter Task ---
@@ -382,30 +388,32 @@ impl Player {
         // self.set_current_item(&item_to_play); // Removed: State set before reporting start
     }
 
+    #[instrument(skip(self))]
     pub async fn play_pause(&mut self) {
         if self.is_playing {
             if self.is_paused {
-                info!("[PLAYER] Resumed playback");
+                info!("Resumed playback");
                 self.resume().await; // resume will set is_paused = false and send update
             } else {
-                info!("[PLAYER] Paused playback");
+                info!("Paused playback");
                 self.pause().await;
             }
         } else if !self.queue.is_empty() {
             // This case should ideally be handled by play_from_start or similar
             // If play_pause starts playback, ensure set_current_item is called
-            info!("[PLAYER] Started playback via play_pause");
+            info!("Started playback via play_pause");
             self.play_from_start().await;
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn pause(&mut self) {
         if !self.is_playing || self.is_paused {
             return;
         }
         
         self.is_paused = true;
-        info!("[PLAYER] State set to paused");
+        info!("State set to paused");
         // Send progress update reflecting paused state
         if let Some(id) = self.current_item_id.clone() {
              self.send_update(PlayerStateUpdate::Progress {
@@ -419,13 +427,14 @@ impl Player {
         // TODO: Implement actual ALSA pause functionality here
     }
 
+    #[instrument(skip(self))]
     pub async fn resume(&mut self) {
         if !self.is_playing || !self.is_paused {
             return;
         }
         
         self.is_paused = false;
-        info!("[PLAYER] State set to resumed");
+        info!("State set to resumed");
         // Send progress update reflecting resumed state
         if let Some(id) = self.current_item_id.clone() {
              self.send_update(PlayerStateUpdate::Progress {
@@ -440,12 +449,13 @@ impl Player {
     }
 
     // Helper to stop playback tasks
+    #[instrument(skip(self))]
     async fn stop_playback_tasks(&mut self) {
         if self.playback_task_handle.is_none() && self.reporter_task_handle.is_none() {
             // No tasks running
             return;
         }
-        info!("[PLAYER] Stopping playback and reporter tasks...");
+        info!("Stopping playback and reporter tasks...");
 
         // Signal reporter task to stop first
         if let Some(tx) = self.reporter_shutdown_tx.take() {
@@ -469,7 +479,7 @@ impl Player {
              }
              match handle.await {
                  Ok(_) => debug!("[PLAYER] Reporter task finished."),
-                 Err(e) if e.is_cancelled() => info!("[PLAYER] Reporter task cancelled."),
+                 Err(e) if e.is_cancelled() => info!("Reporter task cancelled."),
                  Err(e) => error!("[PLAYER] Reporter task panicked or failed: {}", e),
              }
         }
@@ -481,22 +491,23 @@ impl Player {
             match handle.await {
                 Ok(Ok(_)) => debug!("[PLAYER] Playback task finished gracefully."),
                 Ok(Err(e)) => error!("[PLAYER] Playback task finished with error: {}", e),
-                Err(e) if e.is_cancelled() => info!("[PLAYER] Playback task cancelled."),
+                Err(e) if e.is_cancelled() => info!("Playback task cancelled."),
                 Err(e) => error!("[PLAYER] Playback task panicked or failed: {}", e),
             }
         }
 
         self.current_progress = None; // Clear progress state
-        info!("[PLAYER] Playback and reporter tasks stopped.");
+        info!("Playback and reporter tasks stopped.");
     }
 
 
+    #[instrument(skip(self))]
     pub async fn stop(&mut self) {
         if !self.is_playing {
             debug!("[PLAYER] Stop called but not playing.");
             return;
         }
-        info!("[PLAYER] Stop requested.");
+        info!("Stop requested.");
 
         let stopped_item_id = self.current_item_id.clone();
         // Get final position from shared state if possible, otherwise use last known
@@ -548,7 +559,7 @@ if let (Some(client), Some(id)) = (&self.jellyfin_client, stopped_item_id_clone)
      };
 
      match client.report_playback_stopped(&stop_report).await {
-         Ok(_) => info!("[PLAYER] Reported playback stopped successfully for item {}", id),
+         Ok(_) => info!("Reported playback stopped successfully for item {}", id),
          Err(e) => error!("[PLAYER] Failed to report playback stopped for item {}: {}", id, e),
      }
 } else {
@@ -562,6 +573,7 @@ self.current_item_id = None;
 self.position_ticks = 0; // Reset position after stopping
 
 }
+    #[instrument(skip(self))]
     pub async fn next(&mut self) {
         if self.queue.is_empty() {
             warn!("[PLAYER] Queue is empty, cannot skip to next item");
@@ -569,15 +581,16 @@ self.position_ticks = 0; // Reset position after stopping
         }
         
         if self.current_queue_index >= self.queue.len() - 1 {
-            info!("[PLAYER] Already at the end of the queue");
+            info!("Already at the end of the queue");
             return;
         }
         
         self.current_queue_index += 1;
-        info!("[PLAYER] Skipping to next item (index: {})", self.current_queue_index);
+        info!("Skipping to next item (index: {})", self.current_queue_index);
         self.play_current_queue_item().await;
     }
 
+    #[instrument(skip(self))]
     pub async fn previous(&mut self) {
         if self.queue.is_empty() {
             warn!("[PLAYER] Queue is empty, cannot skip to previous item");
@@ -585,18 +598,19 @@ self.position_ticks = 0; // Reset position after stopping
         }
         
         if self.current_queue_index == 0 {
-            info!("[PLAYER] Already at the beginning of the queue");
+            info!("Already at the beginning of the queue");
             return;
         }
         
         self.current_queue_index -= 1;
-        info!("[PLAYER] Skipping to previous item (index: {})", self.current_queue_index);
+        info!("Skipping to previous item (index: {})", self.current_queue_index);
         self.play_current_queue_item().await;
     }
 
+    #[instrument(skip(self), fields(volume))]
     pub async fn set_volume(&mut self, volume: u8) {
         let clamped_volume = volume.min(100); // Ensure volume is 0-100
-        info!("[PLAYER] Setting volume to {}", clamped_volume);
+        info!("Setting volume to {}", clamped_volume);
         self.volume = clamped_volume as i32;
         // Volume changes are implicitly reported via Progress updates
         // which fetch the latest state in the WS handler.
@@ -606,9 +620,10 @@ self.position_ticks = 0; // Reset position after stopping
         // TODO: Implement actual ALSA volume control
     }
 
+    #[instrument(skip(self))]
     pub async fn toggle_mute(&mut self) {
         self.is_muted = !self.is_muted;
-        info!("[PLAYER] Mute toggled: {}", self.is_muted);
+        info!("Mute toggled: {}", self.is_muted);
         // Mute changes are implicitly reported via Progress updates
         // which fetch the latest state in the WS handler.
         // No specific VolumeChanged update needed here.
@@ -617,8 +632,9 @@ self.position_ticks = 0; // Reset position after stopping
         // TODO: Implement actual ALSA mute control
     }
 
+    #[instrument(skip(self), fields(position_ticks))]
     pub async fn seek(&mut self, position_ticks: i64) {
-        info!("[PLAYER] Seeking to position: {}", position_ticks);
+        info!("Seeking to position: {}", position_ticks);
         self.position_ticks = position_ticks;
         // Send progress update after seek
         if let Some(id) = self.current_item_id.clone() {
@@ -636,25 +652,26 @@ self.position_ticks = 0; // Reset position after stopping
 
     /// Performs graceful shutdown of the Player and its components.
     /// This includes stopping background tasks and shutting down the audio player.
+    #[instrument(skip(self))]
     pub async fn shutdown(&mut self) {
-        info!("[PLAYER] Initiating shutdown...");
+        info!("Initiating shutdown...");
 
         // 1. Stop background tasks (playback and reporter)
         self.stop_playback_tasks().await;
 
         // 2. Shutdown the PlaybackOrchestrator
         if let Some(alsa_player_arc) = self.alsa_player.take() { // Take ownership
-            info!("[PLAYER] Shutting down PlaybackOrchestrator...");
+            info!("Shutting down PlaybackOrchestrator...");
             let mut player_guard = alsa_player_arc.lock().await;
             if let Err(e) = player_guard.shutdown().await {
                 error!("[PLAYER] Error during PlaybackOrchestrator shutdown: {}", e);
             } else {
-                info!("[PLAYER] PlaybackOrchestrator shutdown complete.");
+                info!("PlaybackOrchestrator shutdown complete.");
             }
             // Drop the guard explicitly
             drop(player_guard);
         } else {
-            info!("[PLAYER] No PlaybackOrchestrator instance to shut down.");
+            info!("No PlaybackOrchestrator instance to shut down.");
         }
 
         // 3. Clear remaining state (optional, as tasks are stopped)
@@ -664,7 +681,7 @@ self.position_ticks = 0; // Reset position after stopping
         self.queue.clear();
         self.current_queue_index = 0;
 
-        info!("[PLAYER] Shutdown complete.");
+        info!("Shutdown complete.");
     }
 
     }

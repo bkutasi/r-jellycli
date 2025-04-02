@@ -10,15 +10,15 @@ use crate::audio::{
     decoder::{DecodeRefResult, DecodedBufferAndTimestamp, SymphoniaDecoder},
     error::AudioError,
     // format_converter, // Removed unused import
-    progress::{PlaybackProgressInfo, SharedProgress, PROGRESS_UPDATE_INTERVAL},
+    progress::{PlaybackProgressInfo, SharedProgress}, // Removed PROGRESS_UPDATE_INTERVAL
     stream_wrapper::ReqwestStreamWrapper,
 };
-use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, error, info, trace, warn};
+// use indicatif::{ProgressBar, ProgressStyle}; // Removed indicatif import
+use tracing::{debug, error, info, trace, warn, instrument}; // Replaced log with tracing, added instrument
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Instant;
-use symphonia::core::audio::SignalSpec;
+// use symphonia::core::audio::SignalSpec; // Removed unused import
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::io::MediaSourceStreamOptions;
 use symphonia::core::units::TimeBase;
@@ -44,7 +44,7 @@ enum PlaybackLoopExitReason {
 pub struct PlaybackOrchestrator { // Renamed from AlsaPlayer
     // Wrap the handler in Arc<std::sync::Mutex>
     alsa_handler: Arc<Mutex<AlsaPcmHandler>>,
-    progress_bar: Option<Arc<ProgressBar>>,
+    // progress_bar: Option<Arc<ProgressBar>>, // Removed progress bar field
     progress_info: Option<SharedProgress>,
     resampler: Option<Arc<TokioMutex<SincFixedIn<f32>>>>,
 }
@@ -56,7 +56,7 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
         PlaybackOrchestrator { // Renamed from AlsaPlayer
             // Wrap the handler in Arc<std::sync::Mutex>
             alsa_handler: Arc::new(Mutex::new(AlsaPcmHandler::new(device_name))),
-            progress_bar: None,
+            // progress_bar: None, // Removed progress bar initialization
             progress_info: None,
             resampler: None,
         }
@@ -70,116 +70,10 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
 
     // --- Private Helper Methods ---
 
-    /// Calculates total duration and sets up the progress bar and shared info.
-    async fn _setup_progress( // Changed to async fn
-        &mut self,
-        content_length: Option<u64>,
-        track_time_base: Option<TimeBase>,
-        _initial_spec: Option<SignalSpec>, // Keep for potential future use (prefixed with _ to silence warning)
-        total_duration_ticks: Option<i64>,
-    ) -> Result<Arc<ProgressBar>, AudioError> {
-        debug!(target: LOG_TARGET, "Setting up progress bar and info...");
-
-        let total_seconds = total_duration_ticks
-            .and_then(|ticks| {
-                // Convert i64 ticks to u64, handling potential negative values
-                u64::try_from(ticks).ok().and_then(|ts| {
-                    track_time_base.map(|tb| {
-                        let time = tb.calc_time(ts);
-                        time.seconds as f64 + time.frac
-                    })
-                })
-            });
-            // Removed inaccurate bitrate estimation based on content_length
-
-        if let Some(seconds) = total_seconds {
-            debug!(target: LOG_TARGET, "Using total duration: {:.2} seconds", seconds);
-        } else {
-            debug!(target: LOG_TARGET, "Total duration unknown, will use byte progress if available or just spinner.");
-        }
-
-        // Update shared progress info
-        if let Some(progress_mutex) = &self.progress_info {
-            // Lock the async mutex
-            let mut info = progress_mutex.lock().await;
-            info.total_seconds = total_seconds;
-            info.current_seconds = 0.0; // Reset current time
-            debug!(target: LOG_TARGET, "Shared progress info initialized.");
-            // Note: Tokio's mutex lock doesn't return Result, it panics on poison.
-            // Removed the previous error handling for PoisonError.
-        }
-
-        // Configure ProgressBar
-        let pb = Arc::new(ProgressBar::new(0)); // Start with 0, set length later if known
-
-        if let Some(seconds) = total_seconds {
-             pb.set_length(seconds.ceil() as u64);
-             pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] ({eta})")
-                    .map_err(|e| AudioError::InitializationError(format!("Invalid progress bar template: {}", e)))?
-                    .progress_chars("#>-"),
-            );
-            debug!(target: LOG_TARGET, "Progress bar configured for time-based progress.");
-        } else if let Some(len) = content_length {
-             pb.set_length(len);
-             pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} [{elapsed_precise}] {bytes}/{total_bytes} ({bytes_per_sec}, {msg})")
-                    .map_err(|e| AudioError::InitializationError(format!("Invalid progress bar template: {}", e)))?,
-            );
-            pb.set_message("Streaming...");
-            debug!(target: LOG_TARGET, "Progress bar configured for byte-based progress ({} bytes).", len);
-        } else {
-             // No length known, just use a spinner
-             pb.set_style(
-                ProgressStyle::default_spinner()
-                     .template("{spinner:.green} [{elapsed_precise}] {msg}")
-                     .map_err(|e| AudioError::InitializationError(format!("Invalid progress bar template: {}", e)))?,
-             );
-             pb.set_message("Streaming (unknown size)...");
-             debug!(target: LOG_TARGET, "Progress bar configured for spinner (unknown size).");
-        }
-
-        self.progress_bar = Some(pb.clone());
-        Ok(pb)
-    }
+    // Removed _setup_progress function entirely
 
 
-    /// Updates the progress bar and shared progress info based on the current timestamp.
-    async fn _update_progress( // Changed to async fn
-        &self,
-        pb: &ProgressBar,
-        current_ts: u64, // Timestamp comes from the packet/decoder result
-        track_time_base: Option<TimeBase>,
-        last_update_time: &mut Instant,
-    ) {
-        if let Some(tb) = track_time_base {
-            let current_time = tb.calc_time(current_ts);
-            let current_seconds = current_time.seconds as f64 + current_time.frac;
-
-            // Update progress bar position only if it's time-based (length > 0 and not byte-based)
-            let is_time_based = pb.length().unwrap_or(0) > 0; // Check if length is known (> 0)
-            if is_time_based {
-                 let max_pos = pb.length().unwrap(); // We know length > 0 here
-                 pb.set_position( (current_seconds.floor() as u64).min(max_pos) );
-            }
-            // If byte-based, progress is updated by ReqwestStreamWrapper or similar mechanism
-
-            // Update shared state periodically
-            if last_update_time.elapsed() >= PROGRESS_UPDATE_INTERVAL {
-                if let Some(progress_mutex) = &self.progress_info {
-                    // Lock the async mutex
-                    let mut info = progress_mutex.lock().await;
-                    info.current_seconds = current_seconds;
-                    trace!(target: LOG_TARGET, "Updated shared progress: {:.2}s", current_seconds);
-                    // Note: Tokio's mutex lock doesn't return Result, it panics on poison.
-                    // Removed the previous error handling for PoisonError.
-                }
-                *last_update_time = Instant::now();
-            }
-        }
-    }
+    // Removed _update_progress function entirely
 
     /// Writes the decoded S16LE buffer to ALSA, handling blocking and shutdown signals.
     async fn _write_to_alsa(
@@ -461,12 +355,12 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
     async fn playback_loop( // Removed generic type <S>, changed return type
         &mut self,
         mut decoder: SymphoniaDecoder,
-        pb: Arc<ProgressBar>,
+        // pb: Arc<ProgressBar>, // Removed pb parameter
         mut shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<PlaybackLoopExitReason, AudioError> { // Changed return type
         info!(target: LOG_TARGET, "Starting playback loop.");
-        let mut last_progress_update_time = Instant::now();
-        let track_time_base = decoder.time_base();
+        let mut last_progress_update_time = Instant::now(); // Prefixed unused variable
+        let track_time_base = decoder.time_base(); // Prefixed unused variable
 
         loop {
             trace!(target: LOG_TARGET, "--- Playback loop iteration start ---");
@@ -482,32 +376,32 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                     let (num_channels, _current_ts, s16_vec) = match decoded_buffer_ts {
                         DecodedBufferAndTimestamp::U8(audio_buffer, ts) => {
                             let nc = audio_buffer.spec().channels.count();
-                            let vec = self._process_buffer(audio_buffer, ts, &pb, track_time_base, &mut last_progress_update_time).await?;
+                            let vec = self._process_buffer(audio_buffer, ts, /* &pb, */ track_time_base, &mut last_progress_update_time).await?; // Removed pb arg
                             (nc, ts, vec)
                         }
                         DecodedBufferAndTimestamp::S16(audio_buffer, ts) => {
                             let nc = audio_buffer.spec().channels.count();
-                            let vec = self._process_buffer(audio_buffer, ts, &pb, track_time_base, &mut last_progress_update_time).await?;
+                            let vec = self._process_buffer(audio_buffer, ts, /* &pb, */ track_time_base, &mut last_progress_update_time).await?; // Removed pb arg
                             (nc, ts, vec)
                         }
                         DecodedBufferAndTimestamp::S24(audio_buffer, ts) => {
                             let nc = audio_buffer.spec().channels.count();
-                            let vec = self._process_buffer(audio_buffer, ts, &pb, track_time_base, &mut last_progress_update_time).await?;
+                            let vec = self._process_buffer(audio_buffer, ts, /* &pb, */ track_time_base, &mut last_progress_update_time).await?; // Removed pb arg
                             (nc, ts, vec)
                         }
                         DecodedBufferAndTimestamp::S32(audio_buffer, ts) => {
                             let nc = audio_buffer.spec().channels.count();
-                            let vec = self._process_buffer(audio_buffer, ts, &pb, track_time_base, &mut last_progress_update_time).await?;
+                            let vec = self._process_buffer(audio_buffer, ts, /* &pb, */ track_time_base, &mut last_progress_update_time).await?; // Removed pb arg
                             (nc, ts, vec)
                         }
                         DecodedBufferAndTimestamp::F32(audio_buffer, ts) => {
                             let nc = audio_buffer.spec().channels.count();
-                            let vec = self._process_buffer(audio_buffer, ts, &pb, track_time_base, &mut last_progress_update_time).await?;
+                            let vec = self._process_buffer(audio_buffer, ts, /* &pb, */ track_time_base, &mut last_progress_update_time).await?; // Removed pb arg
                             (nc, ts, vec)
                         }
                         DecodedBufferAndTimestamp::F64(audio_buffer, ts) => {
                             let nc = audio_buffer.spec().channels.count();
-                            let vec = self._process_buffer(audio_buffer, ts, &pb, track_time_base, &mut last_progress_update_time).await?;
+                            let vec = self._process_buffer(audio_buffer, ts, /* &pb, */ track_time_base, &mut last_progress_update_time).await?; // Removed pb arg
                             (nc, ts, vec)
                         }
                     };
@@ -527,7 +421,7 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                     // Use the original num_channels, as resampling preserves channel count
                     trace!(target: LOG_TARGET, "Calling _write_to_alsa with {} interleaved frames...", s16_vec.len() / num_channels);
                     if let Err(e) = self._write_to_alsa(&s16_vec, num_channels, &mut shutdown_rx).await {
-                        pb.abandon_with_message(format!("ALSA Write Error: {}", e));
+                        // pb.abandon_with_message(format!("ALSA Write Error: {}", e)); // Removed pb call
                         return Err(e);
                     }
                 }
@@ -538,17 +432,17 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                 Ok(DecodeRefResult::EndOfStream) => {
                     info!(target: LOG_TARGET, "Decoder reached end of stream.");
                     trace!(target: LOG_TARGET, "Breaking playback loop due to EndOfStream.");
-                    pb.finish_with_message("Playback finished");
+                    // pb.finish_with_message("Playback finished"); // Removed pb call
                     return Ok(PlaybackLoopExitReason::EndOfStream); // Return reason
                 }
                  Ok(DecodeRefResult::Shutdown) => {
                     info!(target: LOG_TARGET, "Decoder received shutdown signal.");
-                    pb.abandon_with_message("Playback stopped");
+                    // pb.abandon_with_message("Playback stopped"); // Removed pb call
                     return Ok(PlaybackLoopExitReason::ShutdownSignal); // Return reason
                 }
                 Err(e) => {
                     error!(target: LOG_TARGET, "Fatal decoder error: {}", e);
-                    pb.abandon_with_message(format!("Decoder Error: {}", e));
+                    // pb.abandon_with_message(format!("Decoder Error: {}", e)); // Removed pb call
                     return Err(e);
                 }
             }
@@ -562,10 +456,11 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
     // --- Public Methods ---
 
     /// Streams audio from a URL, decodes it, plays it via ALSA, and updates progress.
+    #[instrument(skip(self, shutdown_rx), fields(url))]
     pub async fn stream_decode_and_play(
         &mut self,
         url: &str,
-        total_duration_ticks: Option<i64>,
+        _total_duration_ticks: Option<i64>, // Prefixed unused variable
         shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<(), AudioError> {
         info!(target: LOG_TARGET, "Starting stream/decode/play for URL: {}", url);
@@ -582,7 +477,7 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
         // --- Symphonia Decoder Setup ---
         let decoder = SymphoniaDecoder::new(mss)?; // Removed mut
         let initial_spec = decoder.initial_spec().ok_or(AudioError::InitializationError("Decoder failed to provide initial spec".to_string()))?;
-        let track_time_base = decoder.time_base();
+        let _track_time_base = decoder.time_base();
 // --- ALSA Initialization & Get Actual Rate ---
 let actual_rate = {
     let mut handler_guard = self.alsa_handler.lock().map_err(|e| AudioError::InvalidState(format!("ALSA handler mutex poisoned on init: {}", e)))?;
@@ -617,12 +512,12 @@ if decoder_rate != actual_rate {
 }
 
         // --- Progress Bar & Info Setup ---
-        let pb = self._setup_progress(content_length, track_time_base, Some(initial_spec), total_duration_ticks).await?;
+        // let pb = self._setup_progress(content_length, track_time_base, Some(initial_spec), total_duration_ticks).await?; // Removed progress setup
 
         // --- Call Non-Generic Playback Loop ---
         // The loop now handles different buffer types internally.
         info!(target: LOG_TARGET, "Starting playback loop (handles format internally)...");
-        let loop_result = self.playback_loop(decoder, pb, shutdown_rx).await;
+        let loop_result = self.playback_loop(decoder, /* pb, */ shutdown_rx).await; // Removed pb arg
 
         // --- End Playback Loop ---
         match loop_result {
@@ -657,16 +552,11 @@ if decoder_rate != actual_rate {
     /// Performs graceful asynchronous shutdown of the playback orchestrator.
     /// This should be called explicitly before dropping the orchestrator to ensure
     /// potentially blocking cleanup operations (like ALSA drain/close) complete.
+    #[instrument(skip(self))]
     pub async fn shutdown(&mut self) -> Result<(), AudioError> {
         info!(target: LOG_TARGET, "Shutting down PlaybackOrchestrator asynchronously.");
 
-        // 1. Abandon Progress Bar (Non-blocking)
-        if let Some(pb) = self.progress_bar.take() {
-            if !pb.is_finished() {
-                pb.finish_and_clear(); // Use finish_and_clear to ensure terminal state restoration
-                debug!(target: LOG_TARGET, "Abandoned progress bar during shutdown.");
-            }
-        }
+        // 1. Progress Bar cleanup removed
 
         // 2. Reset Progress Info (Async lock)
         if let Some(progress_mutex) = self.progress_info.take() { // Take ownership
@@ -730,13 +620,7 @@ if decoder_rate != actual_rate {
         // For example, clearing references that don't involve blocking I/O.
         self.resampler = None;
 
-        // We might choose to abandon the progress bar here too, as it's non-blocking.
-        if let Some(pb) = self.progress_bar.take() {
-             if !pb.is_finished() {
-                 pb.finish_and_clear(); // Use finish_and_clear here too for consistency
-                 debug!(target: LOG_TARGET, "Abandoned progress bar during synchronous close/drop.");
-             }
-        }
+        // Progress bar cleanup removed from close/drop
         // DO NOT attempt to lock/close the ALSA handler here.
         // DO NOT attempt to lock/reset the async progress_info here.
     }
@@ -745,14 +629,14 @@ if decoder_rate != actual_rate {
         &mut self,
         audio_buffer: symphonia::core::audio::AudioBuffer<S>,
         current_ts: u64,
-        pb: &ProgressBar,
-        track_time_base: Option<TimeBase>,
-        last_progress_update_time: &mut Instant,
+        // pb: &ProgressBar, // Removed pb parameter
+        _track_time_base: Option<TimeBase>, // Prefixed unused variable
+        _last_progress_update_time: &mut Instant, // Prefixed unused variable
     ) -> Result<Option<Vec<i16>>, AudioError> { // Return Option<Vec<i16>>
         trace!(target: LOG_TARGET, "Processing buffer: {} frames, ts={}", audio_buffer.frames(), current_ts);
 
         // --- Progress Update ---
-        self._update_progress(pb, current_ts, track_time_base, last_progress_update_time).await;
+        // self._update_progress(pb, current_ts, track_time_base, last_progress_update_time).await; // Removed progress update call
 
         let s16_vec: Vec<i16>;
 

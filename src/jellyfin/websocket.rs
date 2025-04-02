@@ -2,9 +2,10 @@
 //! Manages sending player state updates and receiving remote control commands.
 
 // Removed unused imports: PlaybackStartReport, PlaybackStopReport
+use tracing::instrument;
 use crate::jellyfin::models_playback::{GeneralCommand, PlayCommand, PlayStateCommand}; // Import directly
 use futures::{SinkExt, StreamExt};
-use log::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn}; // Replaced log with tracing
 use serde::{Deserialize, Serialize};
 // Removed unused imports: AtomicBool, Ordering
 use std::sync::Arc;
@@ -145,6 +146,7 @@ impl WebSocketHandler {
     }
 
     /// Establishes the WebSocket connection to the Jellyfin server.
+    #[instrument(skip(self), fields(device_id = %self.device_id))]
     pub async fn connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let parsed_url = Url::parse(&self.server_url)?;
         let scheme = if parsed_url.scheme() == "https" { "wss" } else { "ws" };
@@ -171,14 +173,14 @@ impl WebSocketHandler {
             self.device_id
         );
 
-        info!("[WS Connect] Attempting WebSocket connection to: {}...", host_port); // Log host only for brevity
+        info!("Attempting WebSocket connection to: {}...", host_port); // Log host only for brevity
         debug!("[WS Connect] Full WebSocket URL: {}", ws_url_str);
 
         let ws_url = Url::parse(&ws_url_str)?;
         let (ws_stream, response) = connect_async(ws_url).await?;
 
         debug!("[WS Connect] WebSocket connection established. Response status: {}", response.status());
-        info!("[WS Connect] WebSocket connected successfully to {}", host_port);
+        info!("WebSocket connected successfully to {}", host_port);
 
         // Store the stream temporarily to send the initial message
         let mut temp_ws_stream = ws_stream;
@@ -261,8 +263,9 @@ impl PreparedWebSocketHandler {
     /// Listens for commands from the Jellyfin server and player updates.
     /// This is the main loop for the active WebSocket connection.
     // Make self mutable for shutdown_rx.recv()
+    #[instrument(skip_all, name = "ws_listener_loop")]
     pub async fn listen_for_commands(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("[WS Listen] Starting WebSocket listening loop...");
+        info!("Starting WebSocket listening loop...");
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30)); // Standard interval
 
         loop {
@@ -279,7 +282,7 @@ impl PreparedWebSocketHandler {
                         Some(Ok(msg)) => {
                             if !self.process_incoming_message(msg).await? {
                                 // process_incoming_message returns false if Close frame received
-                                info!("[WS Listen] Received Close frame from server. Exiting loop.");
+                                info!("Received Close frame from server. Exiting loop.");
                                 break;
                             }
                         },
@@ -289,7 +292,7 @@ impl PreparedWebSocketHandler {
                             return Err(format!("WebSocket read error: {}", e).into()); // Exit function with error
                         },
                         None => {
-                            info!("[WS Listen] WebSocket stream ended (returned None). Exiting loop.");
+                            info!("WebSocket stream ended (returned None). Exiting loop.");
                             break; // Exit loop if stream ends
                         }
                     }
@@ -304,7 +307,7 @@ impl PreparedWebSocketHandler {
                              // Decide if this error is fatal. Continuing for now.
                         }
                     } else {
-                        info!("[WS Listen] Player update channel closed. Exiting loop.");
+                        info!("Player update channel closed. Exiting loop.");
                         break; // Exit if the sender side is dropped
                     }
                 },
@@ -327,14 +330,14 @@ impl PreparedWebSocketHandler {
                 // --- Branch 4: Shutdown Signal ---
                 _ = self.shutdown_rx.recv() => {
                     trace!("[WS Listen] select! resolved: shutdown_rx.recv()");
-                    info!("[WS Listen] Shutdown signal received via broadcast channel. Exiting loop.");
+                    info!("Shutdown signal received via broadcast channel. Exiting loop.");
                     break; // Exit the loop
                 }
             }
             trace!("[WS Listen] Reached end of loop iteration.");
         }
 
-        info!("[WS Listen] Listener loop exited.");
+        info!("Listener loop exited.");
         self.close_websocket().await; // Attempt graceful close after loop exit
         Ok(())
     }
@@ -500,7 +503,7 @@ impl PreparedWebSocketHandler {
     async fn close_websocket(&mut self) {
         debug!("[WS Close] Attempting graceful WebSocket close...");
         match self.websocket.close(None).await {
-            Ok(_) => info!("[WS Close] WebSocket closed gracefully."),
+            Ok(_) => info!("WebSocket closed gracefully."),
             Err(e) => warn!("[WS Close] Error during explicit WebSocket close: {}", e),
         }
     }

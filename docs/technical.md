@@ -15,6 +15,8 @@
 - **tokio-tungstenite** (v0.20.1): WebSocket client library for Tokio
 - **rubato** (v0.14): High-quality audio sample rate conversion library
 
+- **tracing** (v0.1): Framework for instrumenting Rust programs to collect structured, event-based diagnostic information.
+- **tracing-subscriber** (v0.3): Utilities for implementing and composing `tracing` subscribers.
 ### External Dependencies
 - **ALSA system libraries**: Required for audio playback on Linux systems
 
@@ -64,6 +66,32 @@
 
 ### API Reference
 - Jellyfin OpenAPI specification is included in the project as `jellyfin-openapi-stable.json`
+
+## Logging
+
+The application utilizes the `tracing` crate ecosystem for structured logging, replacing the previous `log`/`env_logger` setup.
+
+- **Framework**: `tracing` provides the core API for instrumenting code, while `tracing-subscriber` is used to configure how traces and logs are collected and output.
+- **Output Streams**: 
+    - Diagnostic logs (trace, debug, info, warn, error) are directed to `stdout`.
+    - User-facing status messages and interactive UI elements are directed to `stderr` to keep them separate from detailed logs.
+- **Log Format**: Logs sent to `stdout` use a human-readable format configured via `tracing_subscriber::fmt`. This typically includes:
+    - Timestamp
+    - Log level (e.g., INFO, DEBUG)
+    - Active span(s)
+    - Target module path (e.g., `r_jellycli::audio::playback`)
+    - The log message itself.
+- **Log Level Control**: Log verbosity is controlled dynamically at runtime using the `RUST_LOG` environment variable, following the standard `env_logger` directive syntax. Examples:
+    - `RUST_LOG=info`: Show `info`, `warn`, and `error` messages from all crates.
+    - `RUST_LOG=debug`: Show `debug` and higher messages from all crates.
+    - `RUST_LOG=r_jellycli=trace`: Show `trace` and higher messages only from the `r_jellycli` crate.
+    - `RUST_LOG=warn,r_jellycli::jellyfin=debug`: Show `warn` globally, but enable `debug` messages specifically for the `r_jellycli::jellyfin` module.
+
+To enable logging, set the `RUST_LOG` environment variable before running the application:
+```bash
+RUST_LOG=debug cargo run -- --server-url ...
+```
+
 - Official Jellyfin API documentation: https://api.jellyfin.org/
 
 ## Code Structure

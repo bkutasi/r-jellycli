@@ -1,26 +1,65 @@
 use r_jellycli::audio::PlaybackOrchestrator; // Renamed from AlsaPlayer
-use log::error;
-use env_logger;
+use tracing::{error, info, warn}; // Replaced log with tracing
+use tracing::instrument;
+use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt}; // Added for tracing setup
 use r_jellycli::config::Settings;
 use r_jellycli::jellyfin::JellyfinClient;
 use r_jellycli::player::Player;
 use r_jellycli::ui::Cli;
 use tokio::sync::{broadcast, Mutex}; // Added Mutex
 use r_jellycli::init_app_dirs;
-use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use std::error::Error;
 use std::path::Path;
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use log::info; // Added info log
+// Removed log::info import, using tracing::info now
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
+use crossterm::terminal;
+use std::process;
+
+// TerminalCleanup struct removed. Cleanup is now handled explicitly in Ctrl+C handler.
+
+/// Sets up the core player components: PlaybackOrchestrator and Player.
+/// Configures the Player with the Jellyfin client and audio orchestrator.
+#[instrument(skip_all, name = "player_setup")]
+async fn setup_player_components(settings: &Settings, jellyfin_client: JellyfinClient) -> Arc<Mutex<Player>> {
+   info!("Setting up player components...");
+
+   // Create PlaybackOrchestrator instance (needs device name from settings)
+   let playback_orchestrator = Arc::new(Mutex::new(PlaybackOrchestrator::new(&settings.alsa_device)));
+   info!("Created PlaybackOrchestrator for device: {}", settings.alsa_device);
+
+   // Create the central Player state manager
+   let player = Arc::new(Mutex::new(Player::new()));
+   info!("Created central Player instance.");
+
+   // --- Configure Player Dependencies ---
+   { // Scope for player lock
+       let mut player_guard = player.lock().await;
+       player_guard.set_jellyfin_client(jellyfin_client); // Give Player access to the client
+       // Use the existing method name, which now accepts Arc<Mutex<PlaybackOrchestrator>>
+       player_guard.set_alsa_player(playback_orchestrator.clone()); // Give Player access to the audio player
+       info!("Configured Player instance with JellyfinClient and PlaybackOrchestrator.");
+   }
+
+   info!("Player components setup complete.");
+   player // Return the configured player
+}
 
 #[tokio::main]
+#[instrument(skip_all, name = "main")] // Add top-level span, skip args
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize logging based on RUST_LOG environment variable
-    env_logger::init(); // Added initialization
+    // Initialize tracing subscriber for structured JSON logging
+    // Controlled by RUST_LOG env var (e.g., RUST_LOG=r_jellycli=info,warn)
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(fmt::layer()) // Output logs in human-readable format
+        .init();
+
+    // Create the cleanup guard. Its Drop impl runs automatically on exit.
+    // let _cleanup_guard = TerminalCleanup; // Removed TerminalCleanup instantiation
 
     // Create a broadcast channel for shutdown signals for background tasks
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -32,12 +71,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let shutdown_tx_clone = shutdown_tx.clone(); // Clone sender for Ctrl+C handler
     tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
-            println!("\nReceived Ctrl+C, shutting down gracefully...");
             r.store(false, Ordering::SeqCst);
             
-            let _ = shutdown_tx_clone.send(()); // Signal background tasks
+            // Explicitly disable raw mode here before signaling shutdown
+            if let Err(e) = terminal::disable_raw_mode() {
+                error!("Failed to disable terminal raw mode in Ctrl+C handler: {}", e);
+            }
+            // Signal background tasks
+            let _ = shutdown_tx_clone.send(());
         }
     });
+
+    let _init_span = tracing::info_span!("initialization").entered(); // Start init span
 
     // Parse command-line arguments and initialize CLI
     let cli = Cli::new();
@@ -81,12 +126,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let credentials_path = Path::new("credentials.json");
     
     if credentials_path.exists() {
-        println!("Found credentials.json, attempting to load...");
+        info!("Found credentials.json, attempting to load...");
         match fs::read_to_string(credentials_path) {
             Ok(creds_json) => {
                 match serde_json::from_str::<Credentials>(&creds_json) {
                     Ok(creds) => {
-                        println!("Loaded credentials for user: {}", creds.username);
+                        info!("Loaded credentials for user: {}", creds.username);
                         // Override settings with credentials.json if command line arguments aren't provided
                         if args.server_url.is_none() {
                             settings.server_url = creds.server_url;
@@ -98,10 +143,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         creds_password = creds.password;
                         credentials_loaded = true;
                     },
-                    Err(e) => println!("Failed to parse credentials.json: {}", e)
+                    Err(e) => error!("Failed to parse credentials.json: {}", e)
                 }
             },
-            Err(e) => println!("Failed to read credentials.json: {}", e)
+            Err(e) => error!("Failed to read credentials.json: {}", e)
         }
     }
     
@@ -109,10 +154,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let password = if let Some(password) = &args.password {
         password.clone()
     } else if let Ok(password) = std::env::var("JELLYFIN_PASSWORD") {
-        println!("Using password from JELLYFIN_PASSWORD environment variable");
+        info!("Using password from JELLYFIN_PASSWORD environment variable");
         password
     } else if credentials_loaded {
-        println!("Using password from credentials.json");
+        info!("Using password from credentials.json");
         creds_password
     } else {
         // If no password provided and username is set, prompt for password
@@ -146,7 +191,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut settings_updated = false;
     if settings.device_id.is_none() {
         let new_device_id = Uuid::new_v4().to_string();
-        println!("Generated new Device ID: {}", new_device_id);
+        info!("Generated new Device ID: {}", new_device_id);
         settings.device_id = Some(new_device_id);
         settings_updated = true;
     }
@@ -155,31 +200,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if settings_updated {
         if let Err(e) = settings.save(&config_path) {
             // Log warning but continue, as device_id is generated in memory anyway
-            println!("Warning: Failed to save generated Device ID to config file: {}", e);
+            warn!("Failed to save generated Device ID to config file: {}", e);
         } else {
-            println!("Saved generated Device ID to config file.");
+            info!("Saved generated Device ID to config file.");
         }
     }
-// --- Create Core Components ---
+    // Initialize Jellyfin client
+    let mut jellyfin = JellyfinClient::new(&settings.server_url);
 
-// Create PlaybackOrchestrator instance (needs device name from settings)
-let playback_orchestrator = Arc::new(Mutex::new(PlaybackOrchestrator::new(&settings.alsa_device)));
-info!("Created PlaybackOrchestrator for device: {}", settings.alsa_device);
+    drop(_init_span); // End init span
+    let _auth_span = tracing::info_span!("authentication").entered(); // Start auth span
 
-// Create the central Player state manager
-let player = Arc::new(Mutex::new(Player::new()));
-info!("Created central Player instance.");
-
-// Initialize Jellyfin client
-let mut jellyfin = JellyfinClient::new(&settings.server_url);
-    
     // Authenticate with Jellyfin server
     let password_provided = args.password.is_some() || std::env::var("JELLYFIN_PASSWORD").is_ok();
 
     if password_provided {
         if let Some(username) = &settings.username {
             // Always authenticate with username/password if password was provided
-            println!("Authenticating with username: {}", username);
+            info!("Authenticating with username: {}", username);
             // Use the password obtained earlier (from args, env var, creds file, or prompt)
             let auth_response = jellyfin.authenticate(username, &password).await?;
 
@@ -188,7 +226,7 @@ let mut jellyfin = JellyfinClient::new(&settings.server_url);
             settings.api_key = Some(auth_response.access_token.clone());
 
             // Save updated settings to config file
-            println!("Authentication successful, saving new credentials..."); // Added log
+            info!("Authentication successful, saving new credentials...");
             settings.save(&config_path)?;
             // Update the client instance with the new token/user ID immediately
             jellyfin = jellyfin.with_api_key(settings.api_key.as_ref().unwrap());
@@ -199,7 +237,7 @@ let mut jellyfin = JellyfinClient::new(&settings.server_url);
         }
     } else if let Some(api_key) = &settings.api_key {
         // Use existing API key only if no password was provided
-        println!("Using existing API key for authentication.");
+        info!("Using existing API key for authentication.");
         jellyfin = jellyfin.with_api_key(api_key);
 
         if let Some(user_id) = &settings.user_id {
@@ -216,51 +254,48 @@ let mut jellyfin = JellyfinClient::new(&settings.server_url);
         // No username, no password, no API key - cannot authenticate.
         return Err("Cannot authenticate: No username, password, or API key provided or found.".into());
     }
+    drop(_auth_span); // End auth span
 
-    // --- Configure Player Dependencies ---
-    { // Scope for player lock
-        let mut player_guard = player.lock().await;
-        player_guard.set_jellyfin_client(jellyfin.clone()); // Give Player access to the client
-        // Use the existing method name, which now accepts Arc<Mutex<PlaybackOrchestrator>>
-        player_guard.set_alsa_player(playback_orchestrator.clone()); // Give Player access to the audio player
-        info!("Configured Player instance with JellyfinClient and PlaybackOrchestrator.");
-    }
-
+    // --- Setup Player Components ---
+    // Call the new async function to set up the player
+    let player = setup_player_components(&settings, jellyfin.clone()).await;
 
     // --- Initialize Jellyfin Session and Link Player ---
     // This internally calls report_capabilities and starts WebSocket listener
+    let _session_span = tracing::info_span!("session_initialization").entered(); // Start session span
     info!("Initializing Jellyfin session...");
     // 1. Initialize session (reports capabilities, connects WebSocket, creates handler)
     if let Err(e) = jellyfin.initialize_session(settings.device_id.as_ref().unwrap(), running.clone()).await {
-        log::warn!("Failed to initialize session (capabilities report or WebSocket connect): {}. Client may not be visible or controllable.", e);
+        warn!("Failed to initialize session (capabilities report or WebSocket connect): {}. Client may not be visible or controllable.", e);
         // Decide if this is fatal. For now, we continue but WS features might fail.
     } else {
         info!("Session initialized successfully (capabilities reported, WebSocket connected).");
 
         // 2. Set the Player instance on the WebSocket handler
         if let Err(e) = jellyfin.set_player(player.clone()).await {
-            log::warn!("Failed to link Player to WebSocket handler (handler might be missing if WS connection failed): {}", e);
+            warn!("Failed to link Player to WebSocket handler (handler might be missing if WS connection failed): {}", e);
         } else {
             info!("Successfully linked Player to WebSocket handler.");
 
             // 3. Start the WebSocket listener task
             // Pass the broadcast receiver instead of the AtomicBool
             if let Err(e) = jellyfin.start_websocket_listener(shutdown_tx.subscribe()).await {
-                 log::error!("Failed to start WebSocket listener task: {}", e);
+                 error!("Failed to start WebSocket listener task: {}", e);
                  // This is likely a significant issue, consider if the app should exit.
             } else {
                  info!("WebSocket listener task started successfully.");
             }
         }
+        drop(_session_span); // End session span
     }
     
     // Check if we're in test mode (just testing authentication)
     let test_mode = std::env::var("JELLYCLI_TEST_MODE").map(|v| v == "1").unwrap_or(false);
     
     if test_mode {
-        println!("Authentication successful! Test mode enabled, exiting.");
-        println!("Access token: {}", settings.api_key.as_ref().unwrap());
-        println!("User ID: {}", settings.user_id.as_ref().unwrap());
+        info!("Authentication successful! Test mode enabled, exiting.");
+        info!("Access token: {}", settings.api_key.as_ref().unwrap_or(&"None".to_string())); // Use unwrap_or for safety
+        info!("User ID: {}", settings.user_id.as_ref().unwrap_or(&"None".to_string())); // Use unwrap_or for safety
         return Ok(());
     }
     // --- Background Task Management ---
@@ -272,255 +307,158 @@ let mut jellyfin = JellyfinClient::new(&settings.server_url);
     // let settings_arc = Arc::new(settings); // Not needed directly here anymore
 
     // --- Main Application Loop ---
+    let _main_loop_span = tracing::info_span!("main_loop").entered(); // Start main loop span
     // Main application loop
-    println!("Fetching items from server...");
+    info!("Fetching items from server...");
     let mut current_items = jellyfin.get_items().await?;
     let _shutdown_rx = shutdown_tx.subscribe(); // Receiver for main loop (marked unused)
 
     let mut current_parent_id: Option<String> = None;
     
-    println!("Press Ctrl+C at any time to exit the application");
-    
-#[derive(Debug)]
-enum SelectionOutcome {
-    Selected(usize),
-    Quit,
-    Continue,
-    Error(String),
-}
-
-
     'main_loop: while running.load(Ordering::SeqCst) {
         // Display current items
-        cli.display_items(&current_items);
-        
-        // Check if we're running in a non-interactive environment (like Docker)
-        let auto_select_option = std::env::var("AUTO_SELECT_OPTION").ok();
-        
-        let outcome = if let Some(option) = auto_select_option {
-            match option.parse::<usize>() {
-                Ok(idx) if idx >= 1 && idx <= current_items.len() => {
-                    println!("Auto-selecting option {}: {}", idx, current_items[idx - 1].name);
-                    SelectionOutcome::Selected(idx - 1)
-                },
-                _ => {
-                    // In non-interactive mode with invalid option, try to find Music library
-                    let music_index = current_items.iter().position(|item|
-                        item.name.to_lowercase().contains("music"));
-                    
-                    if let Some(idx) = music_index {
-                        println!("AUTO_SELECT_OPTION not valid, auto-selecting Music library at position {}", idx + 1);
-                        SelectionOutcome::Selected(idx)
-                    } else {
-                        println!("AUTO_SELECT_OPTION not valid and Music library not found, defaulting to first option");
-                        SelectionOutcome::Selected(0) // Default to first item
+        // cli.display_items(&current_items); // Commented out: Redundant initial display before auto-selection
+
+        if current_items.is_empty() {
+            // Keep eprintln for direct user feedback before exit
+            eprintln!("No items found in the current view. Exiting.");
+            break 'main_loop;
+        }
+
+        let selected_index_option: Option<usize>; // Use Option to indicate if selection should happen
+
+        if current_parent_id.is_none() {
+            // Initial selection: Hardcode "Music" library
+            info!("Attempting to select 'Music' library...");
+            match current_items.iter().position(|item| item.name == "Music") {
+                Some(idx) => {
+                    info!("Found 'Music' library at index {}. Selecting.", idx + 1);
+                    selected_index_option = Some(idx); // Set the option
+                }
+                None => {
+                    error!("'Music' library not found in the initial list!");
+                    // Ensure raw mode is disabled before exiting
+                    if let Err(e) = terminal::disable_raw_mode() {
+                         error!("Failed to disable terminal raw mode before exit: {}", e);
                     }
+                    process::exit(1); // Exit gracefully
                 }
             }
         } else {
-            // Interactive mode
-            println!("\nEnter the number of the item to select (1-{}) or 'q' to quit: ", current_items.len());
-            
-            // Asynchronous input handling
-            let mut stdin_reader = BufReader::new(stdin());
-            let mut input = String::new();
-            let mut shutdown_rx_input = shutdown_tx.subscribe(); // Need a separate receiver for this select
-
-            tokio::select! {
-                // Wait for input from the user
-                result = stdin_reader.read_line(&mut input) => {
-                    match result {
-                        Ok(0) => { // EOF reached (e.g., pipe closed)
-                            println!("Input stream closed, exiting.");
-                            SelectionOutcome::Quit
-                        }
-                        Ok(_) => {
-                            let trimmed_input = input.trim().to_lowercase();
-                            match trimmed_input.as_str() {
-                                "q" | "quit" => SelectionOutcome::Quit,
-                                _ => {
-                                    match trimmed_input.parse::<usize>() {
-                                        Ok(idx) if idx >= 1 && idx <= current_items.len() => SelectionOutcome::Selected(idx - 1), // Convert 1-based to 0-based
-                                        _ => {
-                                            println!("Invalid selection. Please enter a number between 1 and {} or 'q' to quit", current_items.len());
-                                            SelectionOutcome::Continue // Ask for input again
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!("Error reading input: {}. Exiting.", e);
-                            SelectionOutcome::Error(format!("Input error: {}", e))
-                        }
+            // Subsequent selection (Artist, Album, Track): Check AUTO_SELECT_OPTION
+            let auto_select_option_env = std::env::var("AUTO_SELECT_OPTION").ok();
+            selected_index_option = if let Some(option_str) = auto_select_option_env {
+                match option_str.parse::<usize>() {
+                    Ok(idx_1_based) if idx_1_based >= 1 && idx_1_based <= current_items.len() => {
+                        let idx_0_based = idx_1_based - 1;
+                        info!("AUTO_SELECT_OPTION: Selecting item {} ('{}')", idx_1_based, current_items[idx_0_based].name);
+                        Some(idx_0_based) // Set the option for valid selection
                     }
-                },
-                // Wait for the shutdown signal
-                _ = shutdown_rx_input.recv() => {
-                    // Shutdown signal received while waiting for input
-                    println!("Shutdown signal received while waiting for selection.");
-                    SelectionOutcome::Quit
+                    _ => {
+                        warn!("AUTO_SELECT_OPTION ('{}') is invalid or out of bounds (1-{}). No automatic selection.",
+                                 option_str, current_items.len());
+                        None // Set option to None - invalid selection
+                    }
                 }
-            }
-        };
-
-        // Handle the outcome of the selection
-        let selected_index = match outcome {
-            SelectionOutcome::Selected(idx) => idx,
-            SelectionOutcome::Quit => break 'main_loop,
-            SelectionOutcome::Continue => continue 'main_loop,
-            SelectionOutcome::Error(msg) => {
-                eprintln!("Error during selection: {}", msg);
-                break 'main_loop;
-            }
-        };
+            } else {
+                info!("AUTO_SELECT_OPTION not set. No automatic selection.");
+                None // Set option to None - no env var
+            };
+        }
         
         // If Ctrl+C was pressed during selection, exit
         if !running.load(Ordering::SeqCst) {
             break;
         }
 
-        if selected_index >= current_items.len() {
-            println!("Invalid selection");
-            continue;
-        }
-
-        // --- Handle Selection ---
-        let selected_item = current_items[selected_index].clone();
-
-        // If selected item is a folder, browse into it
-        if selected_item.is_folder {
-            info!("Browsing into folder: {}", selected_item.name);
-            current_parent_id = Some(selected_item.id.clone());
-            // Fetch new items - Use the main jellyfin client instance
-            match jellyfin.get_items_by_parent_id(&selected_item.id).await {
-                Ok(items) => current_items = items,
-                Err(e) => {
-                    error!("Failed to fetch items for folder {}: {}", selected_item.id, e);
-                    // Optionally go back or show error message
-                    // For now, just continue the loop with old items
-                }
+        // --- Handle Selection OR Wait ---
+        if let Some(selected_index) = selected_index_option {
+            // --- Automatic Selection Occurred ---
+            if selected_index >= current_items.len() {
+                // This check should ideally be redundant if the logic above is correct, but good for safety.
+                error!("Internal error: selected_index {} is out of bounds for items list (len {}). Skipping selection.", selected_index, current_items.len());
+                continue;
             }
-            continue; // Go back to display new items
-        }
 
-        // --- Play Selected Item ---
-        // Delegate playback to the central Player instance
-        info!("Selected item for playback: {} ({})", selected_item.name, selected_item.id);
-        cli.display_playback_status(&selected_item); // Show what's intended to play
+            let selected_item = current_items[selected_index].clone();
 
-        // Lock the player and initiate playback
-        // This will internally handle fetching stream URL, starting tasks, and reporting state
-        let player_arc = player.clone(); // Clone Arc for the async block
-        tokio::spawn(async move {
-            let mut player_guard = player_arc.lock().await;
-            // Clear existing queue and play the selected item immediately
-            player_guard.clear_queue().await;
-            player_guard.add_items(vec![selected_item]); // Add the single selected item
-            player_guard.play_from_start().await; // Start playback
-        });
-
-        // After initiating playback, the main loop can continue or wait differently.
-        // For a simple CLI, we might just loop back to show the main menu,
-        // as playback now happens in the background managed by Player/WebSocket.
-        // Or, we could enter a "now playing" state here if desired.
-        // For now, let's just continue the loop to show the current directory again.
-        // Fetch root items again if we were playing from root, or stay in current folder
-        let _parent = current_parent_id.clone(); // Marked unused
-
-        
-        // If Ctrl+C was pressed during playback, exit
-        if !running.load(Ordering::SeqCst) {
-        // Explicitly check if shutdown was triggered during playback handling
-        if !running.load(Ordering::SeqCst) {
-            println!("Shutdown signal detected after playback handling, exiting main loop.");
-            break 'main_loop;
-        }
-
-            break;
-        }
-        
-        // After playback, check if we should go back or quit
-        println!("\nOptions: [b]ack, [q]uit, or Ctrl+C to exit");
-        
-        // Asynchronous input handling for post-playback action
-        let mut stdin_reader = BufReader::new(stdin());
-        let mut input = String::new();
-        let mut shutdown_rx_input = shutdown_tx.subscribe(); // Need a separate receiver for this select
-
-        let input_text = tokio::select! {
-            // Wait for input from the user
-            result = stdin_reader.read_line(&mut input) => {
-                match result {
-                    Ok(0) => { // EOF reached
-                        println!("Input stream closed, exiting.");
-                        "q".to_string() // Treat EOF as quit
-                    }
-                    Ok(_) => {
-                        input.trim().to_lowercase()
-                    }
+            // If selected item is a folder, browse into it
+            if selected_item.is_folder {
+                info!("Browsing into folder: {}", selected_item.name);
+                current_parent_id = Some(selected_item.id.clone());
+                // Fetch new items - Use the main jellyfin client instance
+                match jellyfin.get_items_by_parent_id(&selected_item.id).await {
+                    Ok(items) => current_items = items,
                     Err(e) => {
-                        println!("Error reading input: {}. Exiting.", e);
-                        "q".to_string() // Treat error as quit
+                        error!("Failed to fetch items for folder {}: {}", selected_item.id, e);
+                        // Optionally go back or show error message
+                        // For now, just continue the loop with old items
                     }
                 }
-            },
-            // Wait for the shutdown signal
-            _ = shutdown_rx_input.recv() => {
-                // Shutdown signal received while waiting for input
-                println!("Shutdown signal received while waiting for action.");
-                "q".to_string() // Treat shutdown as quit
-            }
-        };
+                continue; // Go back to display new items
+            } else {
+                // --- Play Selected Item ---
+                // Delegate playback to the central Player instance
+                info!("Selected item for playback: {} ({})", selected_item.name, selected_item.id);
+                cli.display_playback_status(&selected_item); // Show what's intended to play
 
-        match input_text.as_str() {
-            "b" | "back" => {
-                if let Some(parent_id) = &current_parent_id {
-                    // Go back to parent folder
-                    // Need to handle potential error from get_items_by_parent_id
-                    match jellyfin.get_items_by_parent_id(parent_id).await {
-                        Ok(items) => current_items = items,
-                        Err(e) => {
-                            println!("Error fetching parent items: {}", e);
-                            // Decide how to handle error, maybe go to root or retry?
-                            // For now, let's go to root as a fallback
-                            current_items = jellyfin.get_items().await?;
-                            current_parent_id = None;
-                        }
+                // Lock the player and initiate playback
+                // This will internally handle fetching stream URL, starting tasks, and reporting state
+                let player_arc = player.clone(); // Clone Arc for the async block
+                tokio::spawn(async move {
+                    let mut player_guard = player_arc.lock().await;
+                    // Clear existing queue and play the selected item immediately
+                    player_guard.clear_queue().await;
+                    player_guard.add_items(vec![selected_item]); // Add the single selected item
+                    player_guard.play_from_start().await; // Start playback
+                });
+
+                // After initiating playback, wait only for the shutdown signal (Ctrl+C)
+                // Keep eprintln for direct user instruction
+                eprintln!("Playback started. Press Ctrl+C to exit.");
+                let mut shutdown_rx_wait_playback = shutdown_tx.subscribe();
+                tokio::select! {
+                    _ = shutdown_rx_wait_playback.recv() => {
+                         info!("Shutdown signal received during playback wait, exiting loop.");
+                         break 'main_loop; // Exit loop on Ctrl+C
                     }
-                } else {
-                    // Go back to root
-                    current_items = jellyfin.get_items().await?;
-                    current_parent_id = None; // Ensure parent ID is cleared
+                    // We don't wait for playback completion here, only Ctrl+C.
+                    // The Player manages its own lifecycle.
                 }
-            },
-            "q" | "quit" => break 'main_loop,
-            _ => {
-                // If Ctrl+C was pressed (input_text became "q"), this won't be reached.
-                // If any other invalid input, go back to the root menu.
-                println!("Invalid option, returning to root menu.");
-                current_items = jellyfin.get_items().await?;
-                current_parent_id = None;
+            }
+        } else {
+            // --- No Automatic Selection ---
+            // Wait indefinitely for WebSocket commands or Ctrl+C
+            info!("No automatic selection performed. Waiting for external commands or Ctrl+C...");
+            let mut shutdown_rx_wait_idle = shutdown_tx.subscribe();
+            tokio::select! {
+                _ = shutdown_rx_wait_idle.recv() => {
+                     info!("Shutdown signal received while waiting, exiting loop.");
+                     break 'main_loop; // Exit loop on Ctrl+C
+                }
+                // No other branches, just wait for shutdown
             }
         }
     }
     
     // --- Shutdown ---
-    println!("Main loop exited. Initiating graceful shutdown...");
+    drop(_main_loop_span); // End main loop span
+    let _shutdown_span = tracing::info_span!("shutdown").entered(); // Start shutdown span
+    info!("Main loop exited. Initiating graceful shutdown...");
 
     // --- Player Shutdown ---
     // Explicitly shut down the player first, which handles its own tasks and the audio orchestrator.
-    println!("Shutting down player components...");
+    info!("Shutting down player components...");
     { // Scope for player lock
         let mut player_guard = player.lock().await;
         player_guard.shutdown().await; // Call the new shutdown method
     }
-    println!("Player components shut down.");
+    info!("Player components shut down.");
 
     // --- WebSocket Listener Shutdown ---
     // Now wait for the WebSocket listener task (if it was started)
     if let Some(ws_handle) = jellyfin.take_websocket_handle().await {
-        println!("Waiting for WebSocket listener task to finish...");
+        info!("Waiting for WebSocket listener task to finish...");
         if let Err(e) = ws_handle.await {
             error!("Error waiting for WebSocket listener task: {:?}", e); // Use error log level
         } else {
@@ -530,7 +468,11 @@ enum SelectionOutcome {
         info!("No WebSocket listener handle found to await (might not have started)."); // Use info log level
     }
 
-    println!("All tasks finished. Exiting application.");
+    info!("All tasks finished. Exiting application.");
+
+    // Raw mode should have been disabled by the Ctrl+C handler or if the loop exited normally.
+    // No explicit call needed here unless another exit path exists that doesn't trigger the handler.
+    drop(_shutdown_span); // End shutdown span
     Ok(())
 }
 

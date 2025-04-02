@@ -3,7 +3,8 @@
 // Removed unused import: PlaybackProgressInfo
 
 use reqwest::{Client, Error as ReqwestError};
-use log::debug;
+use tracing::debug; // Replaced log with tracing
+use tracing::instrument;
 
 use std::time::SystemTime; // Removed unused Duration
 // Removed unused tokio::time
@@ -35,7 +36,7 @@ impl SessionManager {
     pub fn new(client: Client, server_url: String, api_key: String, user_id: String, device_id: String, play_session_id: String) -> Self {
         // Use the device ID passed in from Settings, instead of generating/loading one here.
         
-        println!("[SESSION] Using device ID: {}", device_id);
+        debug!(device_id = %device_id, "[SESSION] Using device ID");
         
         SessionManager {
             client,
@@ -52,6 +53,7 @@ impl SessionManager {
     /// Report capabilities to the Jellyfin server.
     /// This identifies the client to the server and makes it appear in the "Play On" menu.
     /// According to the reference implementation, this should return 204 No Content.
+    #[instrument(skip(self), fields(device_id = %self.device_id))]
     pub async fn report_capabilities(&self) -> Result<(), ReqwestError> {
         let url = format!("{}/Sessions/Capabilities/Full", self.server_url);
         
@@ -69,7 +71,7 @@ impl SessionManager {
             "0.1.0" // TODO: Get version from Cargo.toml
         );
 
-        println!("[SESSION] Reporting capabilities to: {}", url);
+        debug!(url = %url, "[SESSION] Reporting capabilities");
 
         // Build the capabilities payload as a flat JSON object (matching Go reference)
         let capabilities_payload = serde_json::json!({
@@ -110,13 +112,13 @@ impl SessionManager {
             .await?;
 
         // Check the response status
-        println!("[SESSION] Server response status: {} {}", response.status().as_u16(), response.status().canonical_reason().unwrap_or(""));
+        debug!(status = %response.status(), "[SESSION] Server response status");
 
         let status = response.status();
 
         // Check if the status is 204 No Content, which is expected for success
         if status == reqwest::StatusCode::NO_CONTENT {
-            println!("[SESSION] Capabilities reported successfully (204 No Content).");
+            debug!("[SESSION] Capabilities reported successfully (204 No Content).");
             Ok(())
         } else {
             // If the status is not 204, check if it's a client/server error using error_for_status()
@@ -125,7 +127,7 @@ impl SessionManager {
 
             // If we reach here, the status was successful (e.g., 200 OK, 3xx) but NOT 204.
             // Log a warning and return Ok(()) as the HTTP request itself didn't fail according to reqwest.
-            println!("[SESSION] Warning: Unexpected successful status code: {}. Expected 204 No Content. Treating as success for now.", status);
+            debug!(status = %status, "[SESSION] Warning: Unexpected successful status code. Expected 204 No Content. Treating as success for now.");
             // Consume the response body to avoid resource leaks, though we don't use it.
             let _ = successful_response.text().await; // Consume the body
             Ok(())

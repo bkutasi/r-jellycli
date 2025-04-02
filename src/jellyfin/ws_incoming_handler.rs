@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use log::{debug, error, info, warn};
+use tracing::{debug, error, info, warn}; // Replaced log with tracing
+use tracing::instrument;
 
 use crate::jellyfin::api::JellyfinClient;
 use crate::jellyfin::models::MediaItem;
@@ -11,6 +12,7 @@ use crate::player::Player;
 use super::models_playback::{GeneralCommand, PlayCommand, PlayStateCommand}; // Use specific types
 
 /// Handles "GeneralCommand" messages like SetVolume, ToggleMute.
+#[instrument(skip(player), fields(command_name = %command.name))]
 pub(super) async fn handle_general_command(
     command: GeneralCommand,
     player: Arc<Mutex<Player>>,
@@ -62,6 +64,7 @@ pub(super) async fn handle_general_command(
 }
 
 /// Handles "PlayState" messages like PlayPause, NextTrack, Stop.
+#[instrument(skip(player), fields(command_name = %command.command))]
 pub(super) async fn handle_playstate_command(
     command: PlayStateCommand,
     player: Arc<Mutex<Player>>,
@@ -112,6 +115,7 @@ pub(super) async fn handle_playstate_command(
 }
 
 /// Handles "Play" messages to start or queue playback.
+#[instrument(skip(player, jellyfin_client), fields(command_name = %command.play_command, item_count = command.item_ids.len()))]
 pub(super) async fn handle_play_command(
     command: PlayCommand,
     player: Arc<Mutex<Player>>,
