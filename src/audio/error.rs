@@ -17,6 +17,7 @@ pub enum AudioError {
     TaskJoinError(String),
     InitializationError(String),
     PlaybackError(String), // Added for general playback issues
+    ResamplingError(String), // Added for resampling errors
 }
 
 impl std::fmt::Display for AudioError {
@@ -34,6 +35,7 @@ impl std::fmt::Display for AudioError {
             AudioError::TaskJoinError(e) => write!(f, "Async task join error: {}", e),
             AudioError::InitializationError(e) => write!(f, "Initialization error: {}", e),
             AudioError::PlaybackError(e) => write!(f, "Playback error: {}", e), // Added display for PlaybackError
+            AudioError::ResamplingError(e) => write!(f, "Resampling error: {}", e), // Added display for ResamplingError
         }
     }
 }

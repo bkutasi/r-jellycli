@@ -86,6 +86,15 @@
             *   **Solution**: Implemented proper handling in `_write_to_alsa` (`src/audio/playback.rs`). When a recoverable underrun (`EPIPE`) occurs, the code now calls `pcm.recover(err.errno(), true)` and *retries* the write operation for the *same* chunk instead of discarding it.
             *   **Benefit**: Prevents audio data loss during recoverable underruns, leading to smoother playback.
 
+
+        3.  **`rubato` Resampler API Nuances**:
+            *   **Problem**: Build errors (E0599) occurred when trying to flush or process audio with `rubato`, especially when used with `Mutex`.
+            *   **Lessons**:
+                *   **Trait Scope**: The `rubato::Resampler` trait must be explicitly imported (`use rubato::Resampler;`) for its methods (like `process`) to be available.
+                *   **Flushing**: The correct way to flush remaining samples from the resampler is `resampler.process(&[vec![]], None)?`, not a non-existent `process_last` method.
+                *   **MutexGuard Dereferencing**: When the `Resampler` is held within a `Mutex`, the `MutexGuard` must be dereferenced (`&mut *guard`) before calling trait methods like `process`. Calling methods directly on the guard will fail as the guard itself doesn't implement the trait.
+            *   **Benefit**: Understanding these specifics prevents common build errors and ensures correct interaction with the `rubato` library, particularly in concurrent contexts.
+
 1. **Thread Safety Issues**
    - **Problem**: Box<dyn StdError> was not Send + Sync safe.
    - **Solution**: Properly wrapped errors in std::io::Error with string messages instead of passing raw dynamic error types.

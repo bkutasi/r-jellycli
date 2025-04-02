@@ -197,6 +197,44 @@ info!("Player shut down complete.");
 ```
 
 
+
+#### `rubato` Resampler Build Errors (E0599)
+
+**Error 1**: `error[E0599]: no method named 'process_last' found for mutable reference '&mut SincFixedIn<f32>'`
+
+**Symptom**: Build fails with the above error when attempting to flush the `rubato` resampler.
+
+**Cause**: The `process_last` method does not exist or is not the correct way to flush the specific resampler type being used.
+
+**Solution**: Flush the resampler by calling `process` with an empty input slice and `None` for the output buffer size hint:
+```rust
+// Correct way to flush
+let _ = resampler_instance.process(&[vec![]], None)?;
+```
+
+**Error 2**: `error[E0599]: no method named 'process' found for mutable reference '&mut MutexGuard<'_, Box<dyn Resampler<f32>>>'` (or similar type)
+
+**Symptom**: Build fails with the above error when attempting to call the `process` method on the resampler, often after fixing Error 1.
+
+**Causes**:
+1.  **Trait Not in Scope**: The `rubato::Resampler` trait, which defines the `process` method, is not imported into the current scope.
+2.  **Calling on `MutexGuard`**: The `process` method is being called directly on the `MutexGuard` obtained from locking a `Mutex` containing the resampler, instead of on the resampler itself.
+
+**Solutions**:
+1.  **Import Trait**: Ensure the `Resampler` trait is imported:
+    ```rust
+    use rubato::Resampler;
+    ```
+2.  **Dereference `MutexGuard`**: Dereference the `MutexGuard` to access the underlying resampler object before calling the method:
+    ```rust
+    // Assuming `resampler_mutex` is an Arc<Mutex<Box<dyn Resampler<f32>>>>
+    let mut resampler_guard = resampler_mutex.lock().unwrap();
+    // Correct: Dereference the guard
+    let output_frames = (&mut *resampler_guard).process(&input_frames, None)?;
+    ```
+
+**Note**: These errors often occur together when initially integrating or modifying `rubato` usage, especially involving mutexes for thread safety.
+
 ## Recovery Strategies
 
 ### Session Recovery

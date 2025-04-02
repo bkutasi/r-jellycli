@@ -54,6 +54,7 @@ impl AlsaPcmHandler {
             hwp.set_format(Format::s16())?; // We convert everything to S16LE
             hwp.set_channels(spec.channels.count() as u32)?;
 
+            // Use set_rate_near as Exact is not available in ValueOr
             match hwp.set_rate_near(spec.rate, ValueOr::Nearest) {
                 Ok(_) => {
                     let actual_rate = hwp.get_rate()?;
@@ -63,13 +64,15 @@ impl AlsaPcmHandler {
                             "ALSA rate negotiation: requested={}, actual={}",
                             spec.rate, actual_rate
                         );
-                        // Store the actual rate
-                        self.actual_rate = Some(actual_rate);
                     } else {
                         debug!(target: LOG_TARGET, "ALSA rate set successfully to {}", actual_rate);
-                        // Store the actual rate even if it matches
-                        self.actual_rate = Some(actual_rate);
                     }
+                    // Store the actual rate (needed for playback.rs resampler setup)
+                    self.actual_rate = Some(actual_rate);
+                    // Explicitly set the obtained rate again (Debugger's original suggestion, let's keep it for now)
+                    // This might help ensure the rate sticks, especially with loopback devices.
+                    hwp.set_rate(actual_rate, ValueOr::Nearest)?;
+                    debug!(target: LOG_TARGET, "Re-confirmed ALSA rate set to {}", actual_rate);
                 }
                 Err(e) => {
                     error!(target: LOG_TARGET, "Failed to set ALSA rate near {}: {}", spec.rate, e);
@@ -165,12 +168,12 @@ impl AlsaPcmHandler {
                     Ok(_) => debug!(target: LOG_TARGET, "ALSA drop successful during close."),
                     Err(e) => warn!(target: LOG_TARGET, "Error dropping ALSA buffer during close (ignored): {}", e),
                 }
+                self.actual_rate = None; // Clear actual rate
             }
             // PCM is dropped here, closing the device
             debug!(target: LOG_TARGET, "ALSA PCM closed.");
         }
         self.requested_spec = None; // Clear stored spec
-        self.actual_rate = None; // Clear actual rate
     }
 
     /// Returns the current state of the PCM device.
@@ -182,6 +185,13 @@ impl AlsaPcmHandler {
     pub fn get_actual_rate(&self) -> Option<u32> {
         self.actual_rate
     }
+
+
+    /// Returns the specification requested during initialization.
+    pub fn get_requested_spec(&self) -> Option<SignalSpec> {
+        self.requested_spec.clone() // Clone the Option<SignalSpec>
+    }
+
 }
 
 impl Drop for AlsaPcmHandler {

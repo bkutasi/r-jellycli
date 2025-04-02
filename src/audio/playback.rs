@@ -69,12 +69,6 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
     }
 
     // --- Private Helper Methods ---
-
-    // Removed _setup_progress function entirely
-
-
-    // Removed _update_progress function entirely
-
     /// Writes the decoded S16LE buffer to ALSA, handling blocking and shutdown signals.
     async fn _write_to_alsa(
         &self,
@@ -430,9 +424,62 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                      continue;
                 }
                 Ok(DecodeRefResult::EndOfStream) => {
-                    info!(target: LOG_TARGET, "Decoder reached end of stream.");
-                    trace!(target: LOG_TARGET, "Breaking playback loop due to EndOfStream.");
-                    // pb.finish_with_message("Playback finished"); // Removed pb call
+                    info!(target: LOG_TARGET, "Decoder reached end of stream. Flushing resampler if necessary...");
+
+                    // --- Flush Resampler ---
+                    if let Some(resampler_arc) = self.resampler.as_ref() {
+                        let mut resampler = resampler_arc.lock().await;
+                        trace!(target: LOG_TARGET, "Calling resampler.process_last()...");
+                        // Try calling process_last directly on the guard via DerefMut coercion
+                        // Call process_last on the resampler itself (dereferencing the guard)
+                        // Explicitly get mutable reference and use UFCS for trait method call
+                        // Get mutable reference before the match
+                        // Get mutable reference for the match expression below
+                        let resampler_instance = &mut *resampler;
+                        // Flush the resampler by processing an empty input
+                        match resampler_instance.process(&[vec![]], None) {
+                            Ok(f32_output_vecs) => {
+                                if !f32_output_vecs.is_empty() && !f32_output_vecs[0].is_empty() {
+                                    trace!(target: LOG_TARGET, "Resampler flush successful, got {} output frames.", f32_output_vecs.get(0).map_or(0, |v| v.len()));
+                                    match self._convert_f32_vecs_to_s16(f32_output_vecs) {
+                                        Ok(s16_vec) => {
+                                            if !s16_vec.is_empty() {
+                                                // Use the getter for requested_spec
+                                                // Use the getter for requested_spec
+                                                let num_channels = self.alsa_handler.lock().unwrap().get_requested_spec().map_or(2, |s| s.channels.count()); // Get channels safely using getter
+                                                trace!(target: LOG_TARGET, "Writing flushed resampler buffer ({} frames) to ALSA...", s16_vec.len() / num_channels);
+                                                if let Err(e) = self._write_to_alsa(&s16_vec, num_channels, &mut shutdown_rx).await {
+                                                    error!(target: LOG_TARGET, "Error writing flushed buffer to ALSA: {}", e);
+                                                    // Decide how to handle: return error or just log? Let's return error.
+                                                    return Err(e);
+                                                }
+                                            } else {
+                                                trace!(target: LOG_TARGET, "Flushed resampler buffer converted to empty S16 buffer, skipping write.");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(target: LOG_TARGET, "Failed to convert flushed resampler buffer to S16: {}", e);
+                                            // Decide how to handle: return error or just log? Let's return error.
+                                            return Err(e);
+                                        }
+                                    }
+                                } else {
+                                    trace!(target: LOG_TARGET, "Resampler flush returned no frames.");
+                                }
+                            }
+                            Err(e) => {
+                                error!(target: LOG_TARGET, "Resampler flush (process_last) failed: {}", e);
+                                // Decide how to handle: return error or just log? Let's return error.
+                                // Use the correct error variant
+                                return Err(AudioError::ResamplingError(format!("Resampler flush failed: {}", e)));
+                            }
+                        }
+                    } else {
+                        trace!(target: LOG_TARGET, "No resampler active, no flush needed.");
+                    }
+
+                    // --- Proceed with normal EndOfStream after flushing ---
+                    trace!(target: LOG_TARGET, "Finished flushing (if applicable). Breaking playback loop due to EndOfStream.");
                     return Ok(PlaybackLoopExitReason::EndOfStream); // Return reason
                 }
                  Ok(DecodeRefResult::Shutdown) => {
@@ -652,7 +699,7 @@ if decoder_rate != actual_rate {
                 }
             };
 
-            match resampler.process(&f32_input_vecs, None) {
+            match (&mut *resampler).process(&f32_input_vecs, None) {
                 Ok(f32_output_vecs) => {
                     trace!(target: LOG_TARGET, "Resampling successful, got {} output frames.", f32_output_vecs.get(0).map_or(0, |v| v.len()));
                     s16_vec = match self._convert_f32_vecs_to_s16(f32_output_vecs) {

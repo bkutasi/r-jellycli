@@ -53,6 +53,8 @@
   - Refactored `src/audio/playback.rs`: Decomposed into smaller, focused modules within `src/audio/` (`decoder.rs`, `alsa_handler.rs`, `stream_wrapper.rs`, `format_converter.rs`, `progress.rs`, `error.rs`) to enhance maintainability and clarity. The main `playback.rs` now orchestrates these components.
   - **Goal**: Improve modularity, maintainability, testability, and logging across core components.
   - **Outcome**: Cleaner code structure, better separation of responsibilities, new files created as listed above.
+- ✅ **`rubato` Resampler Fix**: Resolved build errors (E0599) in `src/audio/playback.rs` related to incorrect flushing (`process_last`) and method calls (`process`) on the `rubato` resampler. Corrected flushing method, ensured `Resampler` trait was in scope, and handled `MutexGuard` dereferencing properly.
+
 **Current State Summary**:
 - Audio playback pipeline (decoding, resampling, ALSA writing) is functional.
 - Playback state reporting via HTTP POST is functional.
