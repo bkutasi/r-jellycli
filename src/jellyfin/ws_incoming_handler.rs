@@ -1,7 +1,7 @@
 //! Handles processing of specific incoming WebSocket messages from the Jellyfin server.
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex}; // Add broadcast
 use tracing::{debug, error, info, warn}; // Replaced log with tracing
 use tracing::instrument;
 
@@ -12,50 +12,16 @@ use crate::player::Player;
 use super::models_playback::{GeneralCommand, PlayCommand, PlayStateCommand}; // Use specific types
 
 /// Handles "GeneralCommand" messages like SetVolume, ToggleMute.
-#[instrument(skip(player), fields(command_name = %command.name))]
+#[instrument(skip(_player), fields(command_name = %command.name))]
 pub(super) async fn handle_general_command(
     command: GeneralCommand,
-    player: Arc<Mutex<Player>>,
+    _player: Arc<Mutex<Player>>,
 ) {
     debug!("[WS Incoming] Handling GeneralCommand: {}", command.name);
 
     match command.name.as_str() {
-        "SetVolume" => {
-            if let Some(arguments) = &command.arguments {
-                if let Some(vol_val) = arguments.get("Volume") {
-                    if let Some(vol_u64) = vol_val.as_u64() {
-                        match u8::try_from(vol_u64) {
-                            Ok(vol) if vol <= 100 => {
-                                debug!("[WS Incoming] SetVolume to {}", vol);
-                                { // Scope for the lock guard
-                                    let mut player_guard = player.lock().await;
-                                    player_guard.set_volume(vol).await; // Assuming Player implements this
-                                } // Guard dropped here
-                            }
-                            Ok(vol) => {
-                                warn!("[WS Incoming] Received SetVolume with value > 100: {}", vol);
-                            }
-                            Err(_) => {
-                                error!("[WS Incoming] Failed to convert SetVolume value to u8: {:?}", vol_val);
-                            }
-                        }
-                    } else {
-                        warn!("[WS Incoming] SetVolume 'Volume' argument is not a valid number: {:?}", vol_val);
-                    }
-                } else {
-                    warn!("[WS Incoming] SetVolume command missing 'Volume' argument.");
-                }
-            } else {
-                warn!("[WS Incoming] SetVolume command missing arguments field.");
-            }
-        }
-        "ToggleMute" => {
-            debug!("[WS Incoming] ToggleMute");
-            { // Scope for the lock guard
-                let mut player_guard = player.lock().await;
-                player_guard.toggle_mute().await; // Assuming Player implements this
-            } // Guard dropped here
-        }
+        // Removed SetVolume handler
+        // Removed ToggleMute handler
         // Add other general commands if needed (e.g., SetAudioStreamIndex, SetSubtitleStreamIndex)
         _ => {
             warn!("[WS Incoming] Unhandled GeneralCommand name: {}", command.name);
@@ -68,6 +34,7 @@ pub(super) async fn handle_general_command(
 pub(super) async fn handle_playstate_command(
     command: PlayStateCommand,
     player: Arc<Mutex<Player>>,
+    shutdown_tx: &broadcast::Sender<()>, // Add shutdown sender parameter
 ) {
     debug!("[WS Incoming] Handling PlayState command: {}", command.command);
 
@@ -99,9 +66,17 @@ pub(super) async fn handle_playstate_command(
             player_guard.resume().await;
         }
         "Stop" | "StopMedia" => { // Handle both potential names
-            debug!("[WS Incoming] Stop");
+            info!("[WS Incoming] Stop command received. Stopping playback and clearing queue.");
             let mut player_guard = player.lock().await;
-            player_guard.stop().await;
+            player_guard.stop().await; // Stop playback first
+            player_guard.clear_queue().await; // Then clear the queue
+        
+            // Send shutdown signal
+            info!("[WS Incoming] Sending shutdown signal after Stop command.");
+            if let Err(e) = shutdown_tx.send(()) {
+                error!("[WS Incoming] Failed to send shutdown signal: {}", e);
+                // Log error, but don't prevent the rest of the stop logic
+            }
         }
         "Seek" => {
             if let Some(ticks) = command.seek_position_ticks {
@@ -193,12 +168,13 @@ pub(super) async fn handle_play_command(
             // or ensure the lock is held only for the duration of the specific async call.
             match command.play_command.as_str() {
                 "PlayNow" => {
-                    debug!("[WS Incoming] PlayNow: Clearing queue and adding items.");
-                    // Lock -> Clear -> Add -> Play -> Unlock (implicitly)
+                    debug!("[WS Incoming] PlayNow: Stopping playback, clearing queue, and adding items.");
+                    // Lock -> Stop -> Clear -> Add -> Play -> Unlock (implicitly)
                     let mut player_guard = player.lock().await;
-                    player_guard.clear_queue().await; // Assuming this is quick or handles its own async locking internally
-                    player_guard.add_items(items_to_process); // Assuming this is synchronous
-                    player_guard.play_from_start().await; // Assuming this handles its own async locking internally
+                    player_guard.stop().await; // Explicitly stop current playback first
+                    player_guard.clear_queue().await; // Clear queue state
+                    player_guard.add_items(items_to_process); // Add new items
+                    player_guard.play_from_start().await; // Start playing the new queue
                 }
                 "PlayNext" => {
                     debug!("[WS Incoming] PlayNext: Inserting items at the beginning of the queue.");

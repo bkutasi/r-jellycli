@@ -5,6 +5,8 @@ use std::time::Duration as StdDuration;
 use tokio::sync::{mpsc, Mutex as TokioMutex, broadcast}; // Use TokioMutex alias
 use tokio::task::JoinHandle;
 use crate::audio::{PlaybackOrchestrator, PlaybackProgressInfo}; // Renamed AlsaPlayer
+use crate::audio::AudioError;
+
 use crate::jellyfin::api::{JellyfinClient, JellyfinError}; // Import JellyfinError
 use crate::jellyfin::models::MediaItem;
 use crate::jellyfin::{PlaybackStartReport, PlaybackStopReport, PlaybackReportBase, QueueItem, PlaybackStoppedInfoInner, PlaybackProgressReport}; // Use re-exported path
@@ -36,6 +38,8 @@ pub struct Player {
     playback_shutdown_tx: Option<broadcast::Sender<()>>,
     // Shutdown signal for reporter task
     reporter_shutdown_tx: Option<broadcast::Sender<()>>, // Added
+    // Store the configured ALSA device name
+    alsa_device_name: String,
 }
 
 impl Player {
@@ -58,6 +62,7 @@ impl Player {
             reporter_task_handle: None,
             playback_shutdown_tx: None,
             reporter_shutdown_tx: None, // Added init
+            alsa_device_name: String::new(), // Initialize device name
         }
     }
 
@@ -89,6 +94,12 @@ impl Player {
         } else {
              warn!("[PLAYER] Cannot send state update: sender not configured.");
         }
+    }
+
+    // Method to store the ALSA device name
+    pub fn set_alsa_device_name(&mut self, name: String) {
+        info!("Setting ALSA device name to: {}", name);
+        self.alsa_device_name = name;
     }
 
 
@@ -171,18 +182,23 @@ impl Player {
         }
 
         self.current_queue_index = 0;
-        self.play_current_queue_item().await;
+        if let Err(e) = self.play_current_queue_item().await {
+            error!("[PLAYER] Failed to play item from start: {}", e);
+            // Optionally reset state here if needed
+            self.is_playing = false;
+        }
     }
 
+    // Make play_current_queue_item return Result
     #[instrument(skip(self), fields(queue_index = self.current_queue_index))]
-    async fn play_current_queue_item(&mut self) {
-        // --- Stop existing playback first ---
-        self.stop_playback_tasks().await; // Stop previous tasks if any
+    async fn play_current_queue_item(&mut self) -> Result<(), AudioError> { // Return Result
+        // --- Stop existing playback first --- (REMOVED - Player::stop() handles this before PlayNow calls play_from_start -> play_current_queue_item)
+        // self.stop_playback_tasks().await?; // Stop previous tasks if any, propagate error
 
         if self.current_queue_index >= self.queue.len() {
             warn!("[PLAYER] No item at index {} to play.", self.current_queue_index);
             self.is_playing = false; // Ensure state reflects no playback
-            return;
+            return Ok(()); // Not an error, just nothing to play
         }
 
         let item_to_play = self.queue[self.current_queue_index].clone();
@@ -202,16 +218,22 @@ impl Player {
                 // Assuming get_audio_stream_url exists and returns Result<String, Error>
                 match client.get_stream_url(&item_to_play.id) { // Removed .await
                     Ok(url) => url,
-                    Err(e) => {
+                    Err(e) => { // 'e' is JellyfinError::Authentication or similar
                         error!("[PLAYER] Failed to get stream URL for {}: {}", item_to_play.id, e);
                         // TODO: Maybe try next item or send error update?
-                        return;
+                        self.is_playing = false; // Reset playing state on error
+                        // Map JellyfinError (likely Authentication) to AudioError::InvalidState
+                        return Err(AudioError::InvalidState(format!(
+                            "Failed to get stream URL (likely auth issue): {}",
+                            e
+                        )));
                     }
                 }
             }
             None => {
                 error!("[PLAYER] Jellyfin client not set, cannot get stream URL.");
-                return;
+                self.is_playing = false; // Reset playing state
+                return Err(AudioError::InvalidState("Jellyfin client not configured".to_string()));
             }
         };
         debug!("[PLAYER] Got stream URL: {}", stream_url);
@@ -247,7 +269,7 @@ impl Player {
 
             match client.report_playback_start(&start_report).await {
                 Ok(_) => info!("Reported playback start successfully for item {}", item_to_play.id),
-                Err(e) => error!("[PLAYER] Failed to report playback start for item {}: {}", item_to_play.id, e),
+                Err(e) => error!("[PLAYER] Failed to report playback start for item {}: {}", item_to_play.id, e), // Log error, but don't stop playback
             }
         } else {
             error!("[PLAYER] Cannot report playback start: Jellyfin client not available.");
@@ -259,16 +281,21 @@ impl Player {
         let progress_info = Arc::new(TokioMutex::new(PlaybackProgressInfo::default())); // Use TokioMutex
         self.current_progress = Some(progress_info.clone());
 
-        // Ensure we have an AlsaPlayer instance
-        // If not pre-set, create it here (requires device name from config/args)
-        if self.alsa_player.is_none() {
-             warn!("[PLAYER] AlsaPlayer not set before playback attempt.");
-             // TODO: Get device name and create AlsaPlayer instance
-             // let device_name = "default"; // Or from config
-             // self.alsa_player = Some(Arc::new(Mutex::new(AlsaPlayer::new(device_name))));
-             return; // Cannot proceed without AlsaPlayer
-        }
-        let alsa_player_arc = self.alsa_player.clone().unwrap(); // We checked above
+        // --- Ensure we have a PlaybackOrchestrator instance ---
+        // Since stop_playback_tasks might have taken the old one, create/set a new one.
+        // This assumes we get the device name from somewhere (config/args).
+        // Use the stored device name, falling back to "default" if not set (with error log)
+        let device_name_to_use = if self.alsa_device_name.is_empty() {
+            error!("[PLAYER] ALSA device name not set in Player state! Falling back to 'default'. This should be set during initialization.");
+            "default" // Fallback
+        } else {
+            &self.alsa_device_name
+        };
+        info!("[PLAYER] Creating PlaybackOrchestrator for device: '{}'", device_name_to_use);
+        let new_alsa_player = Arc::new(TokioMutex::new(PlaybackOrchestrator::new(device_name_to_use)));
+        self.alsa_player = Some(new_alsa_player.clone()); // Set the new player instance
+        info!("[PLAYER] Created and set new PlaybackOrchestrator for device '{}'", device_name_to_use);
+        let alsa_player_arc = new_alsa_player; // Use the new instance
 
         // Set the progress tracker on the AlsaPlayer instance
         { // Scope for MutexGuard
@@ -393,6 +420,7 @@ impl Player {
 
         // --- Finalize State (already set earlier) ---
         // self.set_current_item(&item_to_play); // Removed: State set before reporting start
+        Ok(()) // Indicate success
     }
 
     #[instrument(skip(self))]
@@ -463,12 +491,12 @@ impl Player {
         // No ALSA call needed here, the playback loop handles the shared state
     }
 
-    // Helper to stop playback tasks
+    // Helper to stop playback tasks and shut down the associated orchestrator
     #[instrument(skip(self))]
-    async fn stop_playback_tasks(&mut self) {
+    async fn stop_playback_tasks(&mut self) -> Result<(), AudioError> { // Return Result
         if self.playback_task_handle.is_none() && self.reporter_task_handle.is_none() {
             // No tasks running
-            return;
+            return Ok(()); // Nothing to do, return Ok
         }
         info!("Stopping playback and reporter tasks...");
 
@@ -511,8 +539,34 @@ impl Player {
             }
         }
 
+        // --- Explicitly Shutdown the Orchestrator ---
+        // Take the orchestrator instance associated with the stopped tasks.
+        // Assuming self.alsa_player holds the *current* orchestrator.
+        if let Some(alsa_player_arc) = self.alsa_player.take() { // Take ownership
+            info!("Shutting down PlaybackOrchestrator for stopped tasks...");
+            // Lock the orchestrator to call shutdown.
+            // Note: PlaybackOrchestrator::shutdown is async.
+            // We need to ensure the orchestrator isn't locked elsewhere.
+            // Let's assume we can get the lock here.
+            let mut player_guard = alsa_player_arc.lock().await;
+            if let Err(e) = player_guard.shutdown().await {
+                error!("[PLAYER] Error during PlaybackOrchestrator shutdown while stopping tasks: {}", e);
+                // Decide if this should be a fatal error for stop_playback_tasks
+                // return Err(e); // Option: Propagate the error
+            } else {
+                info!("PlaybackOrchestrator shutdown complete during task stop.");
+            }
+            // Drop the guard explicitly
+            drop(player_guard);
+            // Let play_current_queue_item handle creating/setting a new one if needed.
+        } else {
+            info!("No PlaybackOrchestrator instance found to shut down during task stop.");
+        }
+        // --- End Orchestrator Shutdown ---
+
         self.current_progress = None; // Clear progress state
         info!("Playback and reporter tasks stopped.");
+        Ok(()) // Indicate success
     }
 
     /// Helper function to report playback stopped state to Jellyfin.
@@ -584,7 +638,10 @@ impl Player {
         self._report_playback_stopped(stopped_item_id.clone(), final_ticks).await;
 
         // Stop background tasks
-        self.stop_playback_tasks().await;
+        if let Err(e) = self.stop_playback_tasks().await {
+            error!("[PLAYER] Error stopping playback tasks during explicit stop: {}", e);
+            // Handle error as needed, maybe try to continue state update
+        }
 
         // Update state *after* stopping tasks and reporting
         self.is_playing = false;
@@ -599,15 +656,18 @@ impl Player {
             warn!("[PLAYER] Queue is empty, cannot skip to next item");
             return;
         }
-        
+
         if self.current_queue_index >= self.queue.len() - 1 {
             info!("Already at the end of the queue");
             return;
         }
-        
+
         self.current_queue_index += 1;
         info!("Skipping to next item (index: {})", self.current_queue_index);
-        self.play_current_queue_item().await;
+        if let Err(e) = self.play_current_queue_item().await {
+             error!("[PLAYER] Failed to play next item: {}", e);
+             // TODO: Handle error, maybe stop playback or try next?
+        }
     }
 
     #[instrument(skip(self))]
@@ -616,15 +676,18 @@ impl Player {
             warn!("[PLAYER] Queue is empty, cannot skip to previous item");
             return;
         }
-        
+
         if self.current_queue_index == 0 {
             info!("Already at the beginning of the queue");
             return;
         }
-        
+
         self.current_queue_index -= 1;
         info!("Skipping to previous item (index: {})", self.current_queue_index);
-        self.play_current_queue_item().await;
+        if let Err(e) = self.play_current_queue_item().await {
+             error!("[PLAYER] Failed to play previous item: {}", e);
+             // TODO: Handle error
+        }
     }
 
     #[instrument(skip(self), fields(volume))]
@@ -696,22 +759,32 @@ impl Player {
         }
 
         // 1. Stop background tasks (playback and reporter)
-        self.stop_playback_tasks().await;
+        if let Err(e) = self.stop_playback_tasks().await {
+            error!("[PLAYER] Error stopping playback tasks during player shutdown: {}", e);
+            // Continue shutdown process despite error?
+        }
 
         // 2. Shutdown the PlaybackOrchestrator
-        if let Some(alsa_player_arc) = self.alsa_player.take() { // Take ownership
-            info!("Shutting down PlaybackOrchestrator...");
-            let mut player_guard = alsa_player_arc.lock().await;
-            if let Err(e) = player_guard.shutdown().await {
-                error!("[PLAYER] Error during PlaybackOrchestrator shutdown: {}", e);
-            } else {
-                info!("PlaybackOrchestrator shutdown complete.");
-            }
-            // Drop the guard explicitly
-            drop(player_guard);
-        } else {
-            info!("No PlaybackOrchestrator instance to shut down.");
+        // Note: stop_playback_tasks now handles shutting down the orchestrator it stopped.
+        // If a player wasn't running, self.alsa_player might still exist, but shouldn't need explicit shutdown here.
+        // Let's ensure it's cleared if it exists.
+        if self.alsa_player.is_some() {
+             debug!("[PLAYER] Clearing remaining PlaybackOrchestrator instance during shutdown (already stopped if was running).");
+             self.alsa_player = None;
         }
+        // if let Some(alsa_player_arc) = self.alsa_player.take() { // Take ownership
+        //     info!("Shutting down PlaybackOrchestrator...");
+        //     let mut player_guard = alsa_player_arc.lock().await;
+        //     if let Err(e) = player_guard.shutdown().await {
+        //         error!("[PLAYER] Error during PlaybackOrchestrator shutdown: {}", e);
+        //     } else {
+        //         info!("PlaybackOrchestrator shutdown complete.");
+        //     }
+        //     // Drop the guard explicitly
+        //     drop(player_guard);
+        // } else {
+        //     info!("No PlaybackOrchestrator instance to shut down.");
+        // }
 
         // 3. Clear remaining state (optional, as tasks are stopped)
         self.is_playing = false;

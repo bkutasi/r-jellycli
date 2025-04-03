@@ -112,14 +112,22 @@ impl AlsaPcmHandler {
         match io.writei(buffer) {
             Ok(frames_written) => Ok(frames_written),
             Err(e) if e.errno() == Errno::EPIPE => { // Underrun
-                warn!(target: LOG_TARGET, "ALSA buffer underrun (EPIPE), attempting recovery...");
-                match pcm.recover(libc::EPIPE, true) { // Blocking recovery
+                warn!(target: LOG_TARGET, "ALSA buffer underrun (EPIPE), attempting non-blocking recovery...");
+                match pcm.recover(libc::EPIPE, false) { // Non-blocking recovery
                     Ok(()) => {
-                        debug!(target: LOG_TARGET, "ALSA recovery successful.");
+                        debug!(target: LOG_TARGET, "ALSA non-blocking recovery successful (or state already recovered).");
+                        // Even if successful, we didn't write anything in this attempt.
+                        // The caller (playback_loop) should retry the write.
                         Ok(0) // Indicate recovery happened, wrote 0 frames *in this attempt*
                     }
+                    Err(recover_err) if recover_err.errno() == Errno::EAGAIN => {
+                         warn!(target: LOG_TARGET, "ALSA non-blocking recovery would block (EAGAIN). Treating as write error.");
+                         // Treat EAGAIN as an error for this write attempt, let the loop handle potential retries or failure.
+                         // Alternatively, could return Ok(0) here too, but failing might be cleaner during shutdown.
+                         Err(AudioError::AlsaError(format!("ALSA recovery failed (EAGAIN): {}", recover_err)))
+                    }
                     Err(recover_err) => {
-                        error!(target: LOG_TARGET, "ALSA recovery failed: {}", recover_err);
+                        error!(target: LOG_TARGET, "ALSA non-blocking recovery failed with unexpected error: {}", recover_err);
                         Err(AudioError::AlsaError(format!("ALSA recovery failed: {}", recover_err)))
                     }
                 }

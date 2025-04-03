@@ -108,6 +108,24 @@
             *   **Lesson**: The state of the ALSA device (e.g., whether it's paused, running, drained) significantly impacts the behavior of `pcm.close()`. Issues in state management during playback (like improper handling of pause/resume) can manifest as seemingly unrelated problems during shutdown. Robust state management throughout the playback lifecycle is crucial not only for playback itself but also for ensuring clean resource release on exit.
             *   **Benefit**: Recognizing these dependencies helps in debugging shutdown issues by considering the preceding playback state logic.
 
+
+### Tokio Task Management, Concurrency, and Shutdown
+
+1.  **Managing Concurrent Playback Tasks (`PlayNow` Handling)**:
+    *   **Problem**: Implementing the `PlayNow` command correctly, where a new track/queue needs to start immediately, replacing any current playback, proved challenging.
+    *   **Challenge**: Ensuring the *currently running* playback task (e.g., managed by `PlaybackOrchestrator`) and its associated shared resources (especially the ALSA device handle) were fully stopped, cleaned up, and released *before* initiating the new playback task.
+    *   **Lesson**: Simply spawning a new task for the new track is insufficient. State transitions require careful management. It's crucial to explicitly signal the current task to stop, `await` its completion (e.g., using its `JoinHandle`), and ensure all resources it held (like the ALSA handle) are closed/dropped *before* creating and starting the new task and allocating resources to it.
+    *   **Pattern**: For `PlayNow`, the sequence should be: 1. Signal current playback task to stop. 2. Await task completion. 3. Clean up/close resources (e.g., ALSA handle). 4. Clear playback queue/state. 5. Start new playback task with the new item(s). 6. Allocate resources to the new task.
+
+2.  **Graceful Shutdown Synchronization**: 
+    *   **Problem**: Application hanging during shutdown (Ctrl+C or remote `Stop` command) despite having an `async fn shutdown` pattern.
+    *   **Challenge**: Ensuring *all* spawned asynchronous tasks (playback, WebSocket listener, state reporter, etc.) terminate cleanly and that potentially blocking operations (like closing the ALSA device) complete without causing deadlocks.
+    *   **Lesson**: Robust shutdown requires more than just a shutdown signal. It needs careful synchronization:
+        *   Use explicit shutdown signals (e.g., broadcast channels) for all long-running tasks.
+        *   In the main `shutdown` logic, explicitly `await` the `JoinHandle` of *each* spawned task to ensure they have fully completed their cleanup.
+        *   Handle potentially blocking I/O operations during cleanup (like `alsa::PCM::close()`) carefully, potentially using `tokio::task::spawn_blocking` or implementing timeouts if they risk deadlocking the shutdown process.
+        *   The `async fn shutdown` pattern (avoiding blocking ops in `Drop`) is necessary but must be combined with explicit task joining and careful handling of blocking resource cleanup.
+
 1. **Thread Safety Issues**
    - **Problem**: Box<dyn StdError> was not Send + Sync safe.
    - **Solution**: Properly wrapped errors in std::io::Error with string messages instead of passing raw dynamic error types.

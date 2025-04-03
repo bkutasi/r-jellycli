@@ -62,6 +62,7 @@ mod config_integration_tests {
             username: None,
             alsa_device: "default".to_string(),
             user_id: None,
+            device_id: None,
         };
         
         let result = invalid_settings.validate();
@@ -78,6 +79,7 @@ mod config_integration_tests {
             username: None,
             alsa_device: "default".to_string(),
             user_id: None,
+            device_id: None,
         };
         
         // Validation requires either API key or username

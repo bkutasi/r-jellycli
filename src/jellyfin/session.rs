@@ -80,10 +80,10 @@ impl SessionManager {
                 // Advertise specific playback control commands as requested
                 GeneralCommandType::PlayState,
                 GeneralCommandType::Play,
-                GeneralCommandType::VolumeUp,
-                GeneralCommandType::VolumeDown,
-                GeneralCommandType::ToggleMute,
-                GeneralCommandType::SetVolume,
+                // Removed VolumeUp
+                // Removed VolumeDown
+                // Removed ToggleMute
+                // Removed SetVolume
                 GeneralCommandType::SetShuffleQueue,
                 GeneralCommandType::SetRepeatMode,
                 GeneralCommandType::PlayNext,

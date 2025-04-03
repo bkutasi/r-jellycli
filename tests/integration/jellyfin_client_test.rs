@@ -19,6 +19,7 @@ mod jellyfin_integration_tests {
             username: Some("test-user".to_string()),
             alsa_device: "default".to_string(),
             user_id: Some("test-user-id".to_string()),
+            device_id: None,
         };
         
         let client = JellyfinClient::new(&settings.server_url)
@@ -26,8 +27,8 @@ mod jellyfin_integration_tests {
             .with_user_id(&settings.user_id.unwrap());
             
         assert_eq!(client.get_server_url(), "https://test-server.com");
-        assert_eq!(client.get_api_key().as_ref().unwrap(), "test-api-key");
-        assert_eq!(client.get_user_id().as_ref().unwrap(), "test-user-id");
+        assert_eq!(client.get_api_key().unwrap(), "test-api-key");
+        assert_eq!(client.get_user_id().unwrap(), "test-user-id");
     }
 
     /// Test stream URL generation with different parameters

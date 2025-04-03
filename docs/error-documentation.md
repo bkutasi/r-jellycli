@@ -18,6 +18,7 @@
 2. Incorrect command names in SupportedCommands list
 3. Missing required fields in the capabilities object
 
+4. Including non-standard commands (e.g., "Stop") or commands the client doesn't actually handle (e.g., volume controls like "SetVolume") in the `SupportedCommands` list.
 **Solution**:
 1. Wrap all capabilities in a "capabilities" key:
 ```json
@@ -190,13 +191,14 @@ thread 'main' panicked at 'Cannot drop a runtime in a context where blocking is 
 // Or panics related to Mutex::blocking_lock
 ```
 
-**Cause**: Performing potentially blocking operations (like joining tasks, acquiring `blocking_lock` on mutexes, complex I/O such as closing ALSA devices) inside the `Drop` implementation of a struct that lives within an async context (managed by Tokio). The `Drop` trait is synchronous and cannot safely execute blocking code when the async runtime is potentially shutting down or from within an async task. This was the root cause of hangs observed during Ctrl+C shutdown when ALSA devices were being closed.
+**Cause**: Performing potentially blocking operations (like joining tasks, acquiring `blocking_lock` on mutexes, complex I/O such as closing ALSA devices) inside the `Drop` implementation of a struct within an async context. Additionally, failing to properly await the completion of all spawned asynchronous tasks (e.g., playback, WebSocket listener, state reporter) or lacking proper synchronization and timeouts during resource cleanup (especially ALSA device closing) can lead to deadlocks or hangs during shutdown (triggered by Ctrl+C or remote `Stop` command). The `Drop` trait is synchronous and cannot safely execute blocking code or guarantee task completion when the async runtime is shutting down.
 
 **Solution**:
-1.  Avoid complex or blocking logic in `Drop` for types used in async contexts.
-2.  Implement an explicit `async fn shutdown(&mut self)` method on the relevant struct (e.g., `Player`, `PlaybackOrchestrator`).
-3.  Perform all necessary cleanup (stopping tasks, releasing resources, closing handles) within this `async` method.
-4.  Call this `shutdown()` method explicitly *before* the object goes out of scope or the application exits.
+1.  Avoid complex or blocking logic in `Drop` implementations for types used in async contexts.
+2.  Implement an explicit `async fn shutdown(&mut self)` method on relevant structs (e.g., `Player`, `PlaybackOrchestrator`, `WebSocketHandler`).
+3.  Within this `async shutdown` method, ensure **all** spawned tasks are gracefully signaled to stop and then awaited (e.g., using `tokio::task::JoinHandle::await`). Implement timeouts for potentially blocking operations like ALSA device closing (`alsa::PCM::close`) if necessary.
+4.  Perform all resource cleanup (closing handles, releasing locks) within the `shutdown` method *after* tasks have completed.
+5.  Call this `shutdown()` method explicitly during the application's termination sequence (e.g., in the main function after receiving a shutdown signal like Ctrl+C or a remote `Stop` command) *before* letting objects go out of scope.
 ```rust
 // Example in main.rs
 let mut player = Player::new(...);

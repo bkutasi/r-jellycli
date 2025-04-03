@@ -765,13 +765,14 @@ if decoder_rate != actual_rate {
             // Lock guard drops automatically here
         }
 
-        // 3. Close ALSA Handler (Blocking operation in spawn_blocking)
+        // 3. Close ALSA Handler (Blocking operation in spawn_blocking with timeout)
         let alsa_handler_clone = Arc::clone(&self.alsa_handler);
-        debug!(target: LOG_TARGET, "Spawning blocking task for ALSA close...");
-        let close_result = task::spawn_blocking(move || {
+        let close_timeout = std::time::Duration::from_secs(5); // Add a 5-second timeout
+        debug!(target: LOG_TARGET, "Spawning blocking task for ALSA close with {:?} timeout...", close_timeout);
+        let close_future = task::spawn_blocking(move || {
             debug!(target: LOG_TARGET, "Executing blocking ALSA close operation...");
             match alsa_handler_clone.lock() { // std::sync::Mutex lock
-                Ok(mut guard) => {
+                Ok(mut guard) => { // Make guard mutable as close() likely needs &mut self
                     guard.close(); // This might block (e.g., drain)
                     debug!(target: LOG_TARGET, "ALSA handler closed in blocking task.");
                     Ok(()) // Indicate success
@@ -781,21 +782,31 @@ if decoder_rate != actual_rate {
                     Err(AudioError::InvalidState("ALSA handler mutex poisoned during close".to_string()))
                 }
             }
-        }).await; // Await the JoinHandle
+        });
 
-        // Handle potential errors from spawn_blocking (task panic or returned error)
-        match close_result {
-            Ok(Ok(())) => {
-                debug!(target: LOG_TARGET, "Blocking ALSA close task completed successfully.");
+        // Await the JoinHandle with a timeout
+        match tokio::time::timeout(close_timeout, close_future).await {
+            Ok(join_handle_result) => { // Timeout did not expire
+                // Handle potential errors from spawn_blocking (task panic or returned error)
+                match join_handle_result {
+                    Ok(Ok(())) => {
+                        debug!(target: LOG_TARGET, "Blocking ALSA close task completed successfully within timeout.");
+                    }
+                    Ok(Err(e)) => {
+                        error!(target: LOG_TARGET, "Error returned from blocking ALSA close task: {}", e);
+                        // Propagate the error if needed, or just log it
+                        return Err(e);
+                    }
+                    Err(join_error) => {
+                        error!(target: LOG_TARGET, "Blocking ALSA close task panicked: {}", join_error);
+                        return Err(AudioError::TaskJoinError(join_error.to_string()));
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                error!(target: LOG_TARGET, "Error returned from blocking ALSA close task: {}", e);
-                // Propagate the error if needed, or just log it
-                return Err(e);
-            }
-            Err(join_error) => {
-                error!(target: LOG_TARGET, "Blocking ALSA close task panicked: {}", join_error);
-                return Err(AudioError::TaskJoinError(join_error.to_string()));
+            Err(_) => { // Timeout expired
+                error!(target: LOG_TARGET, "Timeout expired ({:?}) waiting for blocking ALSA close task. ALSA resources might not be released cleanly.", close_timeout);
+                // Continue shutdown despite timeout, but maybe return an error or warning?
+                // For now, let's log and continue, returning Ok(()) at the end.
             }
         }
 

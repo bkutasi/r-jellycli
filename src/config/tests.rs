@@ -55,6 +55,8 @@ mod tests {
             api_key: Some("test-api-key".to_string()),
             username: None,
             alsa_device: "default".to_string(),
+            device_id: None,
+
             user_id: None,
         };
         assert!(valid_settings.validate().is_ok());
@@ -65,6 +67,8 @@ mod tests {
             api_key: Some("test-api-key".to_string()),
             username: None,
             alsa_device: "default".to_string(),
+            device_id: None,
+
             user_id: None,
         };
         assert!(invalid_settings.validate().is_err());

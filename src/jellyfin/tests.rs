@@ -17,7 +17,7 @@ mod tests {
         let client = JellyfinClient::new("http://localhost:8096")
             .with_api_key("test_api_key");
         assert_eq!(client.get_server_url(), "http://localhost:8096");
-        assert_eq!(*client.get_api_key(), Some("test_api_key".to_string()));
+        assert_eq!(client.get_api_key(), Some("test_api_key"));
         assert!(client.get_user_id().is_none());
     }
     
@@ -27,8 +27,8 @@ mod tests {
             .with_api_key("test_api_key")
             .with_user_id("test_user_id");
         assert_eq!(client.get_server_url(), "http://localhost:8096");
-        assert_eq!(*client.get_api_key(), Some("test_api_key".to_string()));
-        assert_eq!(*client.get_user_id(), Some("test_user_id".to_string()));
+        assert_eq!(client.get_api_key(), Some("test_api_key"));
+        assert_eq!(client.get_user_id(), Some("test_user_id"));
     }
     
     #[test]

@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 // Removed unused imports: AtomicBool, Ordering
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::{net::TcpStream, sync::broadcast}; // Add broadcast import
-use tokio::sync::{mpsc, Mutex};
+use tokio::{net::TcpStream, sync::{broadcast, mpsc, Mutex}}; // Combine imports
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
@@ -84,6 +83,7 @@ pub struct WebSocketHandler {
     player: Option<Arc<Mutex<Player>>>,
     ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     player_update_tx: Option<mpsc::UnboundedSender<PlayerStateUpdate>>,
+    shutdown_tx: broadcast::Sender<()>, // Add shutdown sender
     // session_id is not used for the initial connection based on jellycli behavior
     // session_id: Option<String>,
 }
@@ -95,6 +95,7 @@ impl WebSocketHandler {
         server_url: &str,
         api_key: &str,
         device_id: &str,
+        shutdown_tx: broadcast::Sender<()>, // Add shutdown_tx parameter
     ) -> Self {
         WebSocketHandler {
             server_url: server_url.trim_end_matches('/').to_string(), // Ensure no trailing slash
@@ -104,6 +105,7 @@ impl WebSocketHandler {
             player: None,
             ws_stream: None,
             player_update_tx: None,
+            shutdown_tx, // Store the sender
             // session_id: None,
         }
     }
@@ -241,6 +243,7 @@ impl WebSocketHandler {
             shutdown_rx, // Store the receiver
             jellyfin_client: self.jellyfin_client.clone(),
             player_update_rx: rx, // Pass the receiver
+            shutdown_tx: self.shutdown_tx.clone(), // Pass the shutdown sender clone
         })
 
     }
@@ -257,6 +260,7 @@ pub struct PreparedWebSocketHandler {
     shutdown_rx: broadcast::Receiver<()>,
     jellyfin_client: JellyfinClient,
     player_update_rx: mpsc::UnboundedReceiver<PlayerStateUpdate>,
+    shutdown_tx: broadcast::Sender<()>, // Add shutdown sender field
 }
 
 impl PreparedWebSocketHandler {
@@ -389,7 +393,7 @@ impl PreparedWebSocketHandler {
     }
 
     /// Handles a successfully parsed `WebSocketMessage`.
-    async fn handle_parsed_message(&self, message: WebSocketMessage) {
+    async fn handle_parsed_message(&mut self, message: WebSocketMessage) { // Make self mutable for shutdown_tx
         trace!("[WS Handle] Handling parsed message type: {}", message.message_type);
         let player_arc = match &self.player {
             Some(p) => p.clone(),
@@ -416,7 +420,8 @@ impl PreparedWebSocketHandler {
             "PlayState" | "Playstate" => { // Handle both potential casings
                 if let Some(data) = message.data {
                      match serde_json::from_value::<PlayStateCommand>(data) {
-                        Ok(cmd) => ws_incoming_handler::handle_playstate_command(cmd, player_arc).await,
+                        // Pass the shutdown sender to the handler
+                        Ok(cmd) => ws_incoming_handler::handle_playstate_command(cmd, player_arc, &self.shutdown_tx).await,
                         Err(e) => error!("[WS Handle] Failed to parse PlayStateCommand data: {}", e),
                     }
                 } else { warn!("[WS Handle] PlayState message missing 'Data'."); }

@@ -4,8 +4,7 @@ use reqwest::Client;
 use std::env;
 use std::error::Error;
 use std::time::Duration;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use tokio::sync::broadcast; // Add broadcast import
 use tokio::time::sleep;
 
 use uuid::Uuid;
@@ -54,8 +53,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let test_device_id = Uuid::new_v4().to_string(); // Generate a dummy ID for the test
     println!("[TEST] Using dummy Device ID: {}", test_device_id);
-    let shutdown_signal = Arc::new(AtomicBool::new(false)); // Create shutdown signal for the test
-    match jellyfin_client.initialize_session(&test_device_id, shutdown_signal.clone()).await {
+    let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1); // Create broadcast channel for shutdown
+    match jellyfin_client.initialize_session(&test_device_id, shutdown_tx).await { // Pass the sender
         Ok(()) => {
             println!("[TEST] Session initialized successfully!");
         }

@@ -6,7 +6,7 @@
 
 **Project Phase**: Core Functionality Implementation
 
-**Last Updated**: April 2, 2025 (Audio Playback Fixes & Refactoring)
+**Last Updated**: April 3, 2025 (Remote Control Implementation & Fixes)
 
 ## Priority Tasks
 
@@ -22,7 +22,7 @@
    - Estimate: 1 day (Refinement)
 
 2. **Playback Controls Enhancement**
-   - Status: Partially Implemented (State reporting via HTTP POST is done; ALSA-level pause/seek/volume control is TODO)
+   - Status: Partially Implemented (State reporting via HTTP POST is done; Remote `PlayNow` and `Stop` implemented; ALSA-level pause/seek/volume control is TODO)
    - Estimate: 1-2 days (Remaining for ALSA controls)
 
 ### Medium Priority
@@ -119,16 +119,25 @@
    - Improved modularity, maintainability, and logging.
    - Status: Completed
 
+12. **Jellyfin Remote Control Command Handling & Fixes**
+    *   Implemented handling for `PlayNow` command to correctly stop existing playback and start new track/queue.
+    *   Implemented handling for `Stop` command to trigger graceful application shutdown.
+    *   Resolved issue where subsequent `PlayNow` commands failed.
+    *   Fixed application hang during shutdown (Ctrl+C or remote `Stop`).
+    *   Corrected capabilities reporting to exclude non-standard commands (e.g., "Stop"), resolving HTTP 400 errors.
+    *   Ensured correct ALSA device usage.
+    *   Removed unnecessary volume control capabilities/handling.
+    *   Status: Completed
 
 ## Backlog
 
-1. **Working remote control from other clients**
+*(Empty)*
 
 ## Timeline
 
 ### Short-term (1-2 weeks)
 - Complete remaining high-priority tasks
-- Improve audio playback quality and controls
+- Improve audio playback quality and controls (ALSA-level pause/seek/volume)
 
 ### Medium-term (1-2 months)
 - Implement medium-priority tasks

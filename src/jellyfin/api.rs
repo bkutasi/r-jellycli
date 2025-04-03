@@ -9,13 +9,13 @@ use crate::jellyfin::models::{ItemsResponse, MediaItem, AuthResponse};
 use crate::jellyfin::session::SessionManager;
 use crate::jellyfin::WebSocketHandler;
 use crate::player::Player;
-use std::sync::atomic::AtomicBool;
+// Removed unused import: use std::sync::atomic::AtomicBool;
 use reqwest::{Client, Error as ReqwestError, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use std::error::Error;
 use std::fmt;
-use std::sync::{Arc}; // Removed Mutex import as it's already imported below
-use tokio::sync::Mutex;
+use std::sync::Arc;
+use tokio::sync::{broadcast, Mutex}; // Add broadcast
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -285,7 +285,7 @@ impl JellyfinClient {
         &mut self,
         api_key: &str,
         device_id: &str,
-        _shutdown_signal: Arc<AtomicBool>, // Prefixed as unused in this specific function
+        shutdown_tx: broadcast::Sender<()>, // Change parameter type
     ) -> Result<(), JellyfinError> {
         debug!("Initializing WebSocket handler with DeviceId: {}", device_id);
 
@@ -294,6 +294,7 @@ impl JellyfinClient {
             &self.server_url,
             api_key,
             device_id,
+            shutdown_tx, // Pass the sender
         );
 
         match ws_handler.connect().await {
@@ -338,8 +339,8 @@ impl JellyfinClient {
     }
 
     /// Initialize the session manager, report capabilities, and establish WebSocket connection.
-    #[instrument(skip(self, shutdown_signal), fields(device_id))]
-    pub async fn initialize_session(&mut self, device_id: &str, shutdown_signal: Arc<AtomicBool>) -> Result<(), JellyfinError> {
+    #[instrument(skip(self, shutdown_tx), fields(device_id))] // Update skip parameter name
+    pub async fn initialize_session(&mut self, device_id: &str, shutdown_tx: broadcast::Sender<()>) -> Result<(), JellyfinError> { // Change parameter type
         info!("Initializing session with DeviceId: {}", device_id);
 
         let (api_key, user_id) = self.ensure_authenticated()?;
@@ -364,7 +365,7 @@ impl JellyfinClient {
         debug!("Session manager created and stored.");
 
         // Initialize WebSocket
-        self._initialize_websocket(&api_key, device_id, shutdown_signal).await?;
+        self._initialize_websocket(&api_key, device_id, shutdown_tx).await?; // Pass the sender
 
         info!("Session initialization complete.");
         Ok(())

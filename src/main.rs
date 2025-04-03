@@ -12,7 +12,7 @@ use std::error::Error;
 use std::path::Path;
 use std::fs;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+// Removed unused import: use std::sync::atomic::{AtomicBool, Ordering};
 // Removed log::info import, using tracing::info now
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,9 @@ async fn setup_player_components(settings: &Settings, jellyfin_client: JellyfinC
        player_guard.set_jellyfin_client(jellyfin_client); // Give Player access to the client
        // Use the existing method name, which now accepts Arc<Mutex<PlaybackOrchestrator>>
        player_guard.set_alsa_player(playback_orchestrator.clone()); // Give Player access to the audio player
-       info!("Configured Player instance with JellyfinClient and PlaybackOrchestrator.");
+       // Set the ALSA device name on the Player instance
+       player_guard.set_alsa_device_name(settings.alsa_device.clone());
+       info!("Configured Player instance with JellyfinClient, PlaybackOrchestrator, and ALSA device name.");
    }
 
    info!("Player components setup complete.");
@@ -63,16 +65,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Create a broadcast channel for shutdown signals for background tasks
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
-    // Create a flag to signal app termination
-    let running = Arc::new(AtomicBool::new(true));
+    // Create a flag to signal app termination (still needed for main loop and Ctrl+C handler)
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = running.clone();
 
     // Set up Ctrl+C handler
     let shutdown_tx_clone = shutdown_tx.clone(); // Clone sender for Ctrl+C handler
     tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
-            r.store(false, Ordering::SeqCst);
-            
+            r.store(false, std::sync::atomic::Ordering::SeqCst); // Use full path for Ordering
+
             // Explicitly disable raw mode here before signaling shutdown
             if let Err(e) = terminal::disable_raw_mode() {
                 error!("Failed to disable terminal raw mode in Ctrl+C handler: {}", e);
@@ -265,7 +267,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _session_span = tracing::info_span!("session_initialization").entered(); // Start session span
     info!("Initializing Jellyfin session...");
     // 1. Initialize session (reports capabilities, connects WebSocket, creates handler)
-    if let Err(e) = jellyfin.initialize_session(settings.device_id.as_ref().unwrap(), running.clone()).await {
+    // Pass the shutdown sender clone instead of the running flag Arc
+    if let Err(e) = jellyfin.initialize_session(settings.device_id.as_ref().unwrap(), shutdown_tx.clone()).await {
         warn!("Failed to initialize session (capabilities report or WebSocket connect): {}. Client may not be visible or controllable.", e);
         // Decide if this is fatal. For now, we continue but WS features might fail.
     } else {
@@ -315,7 +318,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut current_parent_id: Option<String> = None;
     
-    'main_loop: while running.load(Ordering::SeqCst) {
+    'main_loop: while running.load(std::sync::atomic::Ordering::SeqCst) { // Use full path for Ordering
         // Display current items
         // cli.display_items(&current_items); // Commented out: Redundant initial display before auto-selection
 
@@ -367,7 +370,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         
         // If Ctrl+C was pressed during selection, exit
-        if !running.load(Ordering::SeqCst) {
+        if !running.load(std::sync::atomic::Ordering::SeqCst) { // Use full path for Ordering
             break;
         }
 
