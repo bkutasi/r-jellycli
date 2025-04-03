@@ -60,3 +60,82 @@ pub struct User {
     #[serde(default, rename = "ServerName", alias = "serverName")]
     pub server_name: Option<String>,
 }
+
+
+
+/// Media types supported by the client.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MediaType {
+    Audio,
+    Video,
+    Photo,
+    Book,
+    Unknown,
+}
+
+/// General command types supported by the client.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum GeneralCommandType {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    PageUp,
+    PageDown,
+    PreviousLetter,
+    NextLetter,
+    ToggleOsd,
+    ToggleContextMenu,
+    Select,
+    Back,
+    TakeScreenshot,
+    SendKey,
+    SendString,
+    GoHome,
+    GoToSettings,
+    VolumeUp,
+    VolumeDown,
+    Mute,
+    Unmute,
+    ToggleMute,
+    SetVolume,
+    SetAudioStreamIndex,
+    SetSubtitleStreamIndex,
+    ToggleFullscreen,
+    DisplayContent,
+    GoToSearch,
+    DisplayMessage,
+    SetRepeatMode,
+    ChannelUp,
+    ChannelDown,
+    Guide,
+    ToggleStats,
+    PlayMediaSource,
+    PlayTrailers,
+    SetShuffleQueue,
+    PlayState, // Covers Play, Pause, Stop, Seek etc.
+    PlayNext,
+    ToggleOsdMenu,
+    // Play, // Covered by PlayState? Check API usage. Let's omit for now based on spec enum.
+    SetMaxStreamingBitrate,
+    SetPlaybackOrder,
+}
+
+/// Represents the client capabilities sent to the server.
+#[derive(Serialize, Debug, Clone)]
+pub struct ClientCapabilitiesDto {
+    #[serde(rename = "PlayableMediaTypes")]
+    pub playable_media_types: Option<Vec<MediaType>>,
+    #[serde(rename = "SupportedCommands")]
+    pub supported_commands: Option<Vec<GeneralCommandType>>,
+    #[serde(rename = "SupportsMediaControl")]
+    pub supports_media_control: bool,
+    #[serde(rename = "SupportsPersistentIdentifier")]
+    pub supports_persistent_identifier: bool,
+    #[serde(rename = "DeviceProfile", skip_serializing_if = "Option::is_none")]
+    pub device_profile: Option<serde_json::Value>, // Using Value for simplicity, can be refined if needed
+    #[serde(rename = "AppStoreUrl", skip_serializing_if = "Option::is_none")]
+    pub app_store_url: Option<String>,
+    #[serde(rename = "IconUrl", skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+}

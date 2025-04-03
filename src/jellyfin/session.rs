@@ -11,7 +11,7 @@ use std::time::SystemTime; // Removed unused Duration
 use std::sync::{Arc, Mutex};
 use serde_json;
 use hostname;
-
+use super::models::{ClientCapabilitiesDto, MediaType, GeneralCommandType}; // Import new models
 // Removed unused imports: PlaybackStartReport, PlaybackStopReport
 
 // Removed unused generate_device_id function.
@@ -73,28 +73,33 @@ impl SessionManager {
 
         debug!(url = %url, "[SESSION] Reporting capabilities");
 
-        // Build the capabilities payload as a flat JSON object (matching Go reference)
-        let capabilities_payload = serde_json::json!({
-            "PlayableMediaTypes": ["Audio"],
-            "QueueableMediaTypes": ["Audio"],
-            "SupportedCommands": [
-                "VolumeUp",
-                "VolumeDown",
-                "Mute",
-                "Unmute",
-                "ToggleMute",
-                "SetVolume",
-                "SetShuffleQueue"
-                // Removed commands not present in Go reference for capabilities reporting
-            ],
-            "SupportsMediaControl": true,
-            "SupportsPersistentIdentifier": false, // Set to false as per plan
-            "ApplicationVersion": "0.1.0", // TODO: Get version from Cargo.toml
-            "Client": "r-jellycli",
-            "DeviceName": hostname,
-            "DeviceId": self.device_id,
-            // Removed the top-level "Capabilities" wrapper
-        });
+        // Build the capabilities payload using the defined struct
+        let capabilities_payload = ClientCapabilitiesDto {
+            playable_media_types: Some(vec![MediaType::Audio]),
+            supported_commands: Some(vec![
+                // Populate with actual GeneralCommandType variants
+                GeneralCommandType::MoveUp,
+                GeneralCommandType::MoveDown,
+                GeneralCommandType::MoveLeft,
+                GeneralCommandType::MoveRight,
+                GeneralCommandType::PageUp,
+                GeneralCommandType::PageDown,
+                GeneralCommandType::PreviousLetter,
+                GeneralCommandType::NextLetter,
+                GeneralCommandType::ToggleOsd,
+                GeneralCommandType::ToggleContextMenu,
+                GeneralCommandType::Select,
+                GeneralCommandType::Back,
+                // Note: Playback commands (Play, Pause, Stop, etc.) are handled
+                // via different mechanisms (e.g., WebSocket PlayStateCommand)
+                // and are not part of GeneralCommandType for client capabilities reporting.
+            ]),
+            supports_media_control: true,
+            supports_persistent_identifier: false, // Keep this false as per previous decision
+            device_profile: None, // Set optional fields to None for now
+            app_store_url: None,
+            icon_url: None,
+        };
 
         // Log the JSON being sent using debug level
         debug!("[SESSION] Sending capabilities JSON payload:\n{}",
@@ -140,6 +145,7 @@ impl SessionManager {
     
     
     /// Get the device ID
+    #[allow(dead_code)]
     pub fn get_device_id(&self) -> String {
         self.device_id.clone()
     }

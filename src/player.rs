@@ -500,6 +500,53 @@ impl Player {
         info!("Playback and reporter tasks stopped.");
     }
 
+    /// Helper function to report playback stopped state to Jellyfin.
+    #[instrument(skip(self, stopped_item_id, final_ticks))]
+    async fn _report_playback_stopped(&self, stopped_item_id: Option<String>, final_ticks: i64) {
+        if let (Some(client), Some(id)) = (&self.jellyfin_client, stopped_item_id) {
+            let session_id = client.play_session_id().to_string();
+            // Generate queue items based on the current queue state
+            let queue_items: Vec<QueueItem> = self.queue.iter().enumerate().map(|(idx, item)| QueueItem {
+                id: item.id.clone(),
+                playlist_item_id: format!("playlistItem{}", idx),
+            }).collect();
+
+            // Capture necessary state for the report
+            let report_base = PlaybackReportBase {
+                queueable_media_types: vec!["Audio".to_string()],
+                can_seek: true,
+                item_id: id.clone(),
+                media_source_id: id.clone(),
+                position_ticks: final_ticks, // Use provided final position
+                volume_level: self.volume,
+                is_paused: false, // Stopped means not paused
+                is_muted: self.is_muted,
+                play_method: "DirectPlay".to_string(),
+                play_session_id: session_id,
+                live_stream_id: None,
+                // Find the original item to get its duration for playlist_length
+                playlist_length: self.queue.iter().find(|item| item.id == id).and_then(|item| item.run_time_ticks).unwrap_or(0),
+                playlist_index: Some(self.current_queue_index as i32), // Use current index
+                shuffle_mode: "Sorted".to_string(), // TODO: Add shuffle state
+                now_playing_queue: queue_items,
+            };
+
+            let stop_report = PlaybackStopReport {
+                base: report_base,
+                playback_stopped_info: PlaybackStoppedInfoInner {
+                    played_to_completion: false, // Explicit stop/shutdown is not completion
+                },
+            };
+
+            match client.report_playback_stopped(&stop_report).await {
+                Ok(_) => info!("Reported playback stopped successfully for item {}", id),
+                Err(e) => error!("[PLAYER] Failed to report playback stopped for item {}: {}", id, e),
+            }
+        } else {
+            error!("[PLAYER] Cannot report playback stopped: Jellyfin client or Item ID not available.");
+        }
+    }
+
 
     #[instrument(skip(self))]
     pub async fn stop(&mut self) {
@@ -518,61 +565,19 @@ impl Player {
             self.position_ticks // Fallback if progress info is None
         };
 
-let stopped_item_id_clone = stopped_item_id.clone(); // Clone for reporting
+        // Report Playback Stopped *before* stopping tasks
+        self._report_playback_stopped(stopped_item_id.clone(), final_ticks).await;
 
-// Stop background tasks
-self.stop_playback_tasks().await;
+        // Stop background tasks
+        self.stop_playback_tasks().await;
 
-// --- Report Playback Stopped via HTTP POST ---
-if let (Some(client), Some(id)) = (&self.jellyfin_client, stopped_item_id_clone) {
-     let session_id = client.play_session_id().to_string();
-     let queue_items: Vec<QueueItem> = self.queue.iter().enumerate().map(|(idx, item)| QueueItem {
-         id: item.id.clone(),
-         playlist_item_id: format!("playlistItem{}", idx),
-     }).collect();
+        // Update state *after* stopping tasks and reporting
+        self.is_playing = false;
+        self.is_paused = false;
+        self.current_item_id = None;
+        self.position_ticks = 0; // Reset position after stopping
 
-     // Need to capture state *before* clearing it below
-     let report_base = PlaybackReportBase {
-         queueable_media_types: vec!["Audio".to_string()],
-         can_seek: true,
-         item_id: id.clone(),
-         media_source_id: id.clone(),
-         position_ticks: final_ticks, // Use final position
-         volume_level: self.volume,
-         is_paused: false, // Stopped means not paused
-         is_muted: self.is_muted,
-         play_method: "DirectPlay".to_string(),
-         play_session_id: session_id,
-         live_stream_id: None,
-         // Find the original item to get its duration for playlist_length
-         playlist_length: self.queue.iter().find(|item| item.id == id).and_then(|item| item.run_time_ticks).unwrap_or(0),
-         playlist_index: Some(self.current_queue_index as i32), // Index might be inaccurate if queue changed, but best effort
-         shuffle_mode: "Sorted".to_string(), // TODO: Add shuffle state
-         now_playing_queue: queue_items,
-     };
-
-     let stop_report = PlaybackStopReport {
-         base: report_base,
-         playback_stopped_info: PlaybackStoppedInfoInner {
-             played_to_completion: false, // Explicit stop is not completion
-         },
-     };
-
-     match client.report_playback_stopped(&stop_report).await {
-         Ok(_) => info!("Reported playback stopped successfully for item {}", id),
-         Err(e) => error!("[PLAYER] Failed to report playback stopped for item {}: {}", id, e),
-     }
-} else {
-     error!("[PLAYER] Cannot report playback stopped: Jellyfin client or Item ID not available.");
-}
-
-// Update state *after* stopping tasks and reporting
-self.is_playing = false;
-self.is_paused = false;
-self.current_item_id = None;
-self.position_ticks = 0; // Reset position after stopping
-
-}
+    }
     #[instrument(skip(self))]
     pub async fn next(&mut self) {
         if self.queue.is_empty() {
@@ -655,6 +660,25 @@ self.position_ticks = 0; // Reset position after stopping
     #[instrument(skip(self))]
     pub async fn shutdown(&mut self) {
         info!("Initiating shutdown...");
+
+        // Capture state *before* stopping tasks
+        let item_id_before_shutdown = self.current_item_id.clone();
+        let final_ticks_before_shutdown = if let Some(progress_arc) = self.current_progress.as_ref() {
+             // Try to get the most recent position from the shared state
+             let p_info = progress_arc.lock().await;
+             (p_info.current_seconds * 10_000_000.0) as i64
+         } else {
+             // Fallback to the last known position in the Player struct
+             self.position_ticks
+         };
+
+        // Report playback stopped if an item was playing
+        if item_id_before_shutdown.is_some() {
+            info!("Reporting playback stopped during shutdown...");
+            self._report_playback_stopped(item_id_before_shutdown, final_ticks_before_shutdown).await;
+        } else {
+            info!("No active item playing, skipping stop report during shutdown.");
+        }
 
         // 1. Stop background tasks (playback and reporter)
         self.stop_playback_tasks().await;

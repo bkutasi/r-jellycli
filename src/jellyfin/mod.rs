@@ -15,4 +15,3 @@ pub use websocket::WebSocketHandler;
 pub use auth::*;
 pub use models::*;
 pub use models_playback::*;
-pub use session::*;

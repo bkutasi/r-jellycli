@@ -345,6 +345,43 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
     }
 
 
+    /// Updates the shared progress information based on the current timestamp.
+    async fn _update_progress(
+        &self,
+        current_ts: u64,
+        track_time_base: Option<TimeBase>,
+        last_progress_update_time: &mut Instant,
+    ) {
+        // Update progress roughly every second
+        if last_progress_update_time.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+
+        if let (Some(progress_arc), Some(time_base)) = (&self.progress_info, track_time_base) {
+            let current_seconds = time_base.calc_time(current_ts).seconds as f64
+                + time_base.calc_time(current_ts).frac;
+
+            trace!(target: LOG_TARGET, "Updating progress: TS={}, Seconds={:.2}", current_ts, current_seconds);
+
+            match progress_arc.lock().await {
+                // Removed Ok wrapping since Tokio MutexGuard isn't Result
+                mut progress_guard => {
+                    progress_guard.current_seconds = current_seconds;
+                    *last_progress_update_time = Instant::now();
+                }
+                // Removed Err arm for PoisonError, Tokio Mutex panics on poison
+            }
+        } else {
+            if self.progress_info.is_none() {
+                trace!(target: LOG_TARGET, "Skipping progress update: progress_info not set.");
+            }
+            if track_time_base.is_none() {
+                trace!(target: LOG_TARGET, "Skipping progress update: track_time_base not set.");
+            }
+        }
+    }
+
+
     /// The main loop for decoding packets and sending them to ALSA.
     async fn playback_loop( // Removed generic type <S>, changed return type
         &mut self,
@@ -367,7 +404,7 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                 Ok(DecodeRefResult::DecodedOwned(decoded_buffer_ts)) => {
                     // Extract buffer and timestamp based on the enum variant
                     // Prefix unused `ts` with underscore in match arms
-                    let (num_channels, _current_ts, s16_vec) = match decoded_buffer_ts {
+                    let (num_channels, _current_ts, s16_vec) = match decoded_buffer_ts { // Renamed _current_ts to current_ts
                         DecodedBufferAndTimestamp::U8(audio_buffer, ts) => {
                             let nc = audio_buffer.spec().channels.count();
                             let vec = self._process_buffer(audio_buffer, ts, /* &pb, */ track_time_base, &mut last_progress_update_time).await?; // Removed pb arg
@@ -677,13 +714,13 @@ if decoder_rate != actual_rate {
         audio_buffer: symphonia::core::audio::AudioBuffer<S>,
         current_ts: u64,
         // pb: &ProgressBar, // Removed pb parameter
-        _track_time_base: Option<TimeBase>, // Prefixed unused variable
-        _last_progress_update_time: &mut Instant, // Prefixed unused variable
+        track_time_base: Option<TimeBase>, // Renamed _track_time_base
+        last_progress_update_time: &mut Instant, // Renamed _last_progress_update_time
     ) -> Result<Option<Vec<i16>>, AudioError> { // Return Option<Vec<i16>>
         trace!(target: LOG_TARGET, "Processing buffer: {} frames, ts={}", audio_buffer.frames(), current_ts);
 
         // --- Progress Update ---
-        // self._update_progress(pb, current_ts, track_time_base, last_progress_update_time).await; // Removed progress update call
+        self._update_progress(current_ts, track_time_base, last_progress_update_time).await; // Uncommented and removed pb arg
 
         let s16_vec: Vec<i16>;
         const RESAMPLER_CHUNK_SIZE: usize = 1024; // Must match initialization
