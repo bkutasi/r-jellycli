@@ -95,6 +95,13 @@
                 *   **MutexGuard Dereferencing**: When the `Resampler` is held within a `Mutex`, the `MutexGuard` must be dereferenced (`&mut *guard`) before calling trait methods like `process`. Calling methods directly on the guard will fail as the guard itself doesn't implement the trait.
             *   **Benefit**: Understanding these specifics prevents common build errors and ensures correct interaction with the `rubato` library, particularly in concurrent contexts.
 
+
+        4.  **`rubato` Resampler Input Chunk Size Requirement**:
+            *   **Problem**: Audio distortion (playing too fast) occurred during remote playback (WebSocket) when resampling was needed (e.g., 44.1kHz to 48kHz).
+            *   **Cause**: The `rubato` resampler requires input audio data to be provided in fixed-size chunks. Feeding it variable-sized chunks (as received over the network) directly caused processing errors leading to speed distortion.
+            *   **Lesson**: When using `rubato`, ensure that incoming audio data (especially from variable sources like network streams) is buffered and processed into fixed-size chunks *before* being passed to the resampler. Proper buffer management upstream of the resampler is critical for correct operation.
+            *   **Benefit**: Prevents resampling artifacts and ensures accurate playback speed when dealing with variable input buffer sizes.
+
 1. **Thread Safety Issues**
    - **Problem**: Box<dyn StdError> was not Send + Sync safe.
    - **Solution**: Properly wrapped errors in std::io::Error with string messages instead of passing raw dynamic error types.

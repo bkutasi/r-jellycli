@@ -77,6 +77,19 @@
 **Solution**: Switched playback state reporting (`PlaybackStart`, `PlaybackProgress`, `PlaybackStop`) from WebSocket messages to direct HTTP POST requests to the corresponding REST API endpoints. This completely bypassed the problematic WebSocket interaction for reporting.
 
 
+### Audio Playback Issues
+
+#### Audio Distortion/Speed Issues with Resampling (WebSocket Playback)
+
+**Symptom:** Audio plays too fast or sounds distorted during remote playback initiated via WebSocket, specifically when the source audio sample rate (e.g., 44.1kHz) differs from the output device's sample rate (e.g., 48kHz), requiring resampling.
+
+**Root Cause:** The `rubato` resampling library expects audio data in fixed-size chunks. The playback logic in `src/audio/playback.rs` (specifically the `_process_buffer` function or related logic handling WebSocket data) was feeding variable-sized chunks received over the network directly to the resampler.
+
+**Resolution:** The audio processing pipeline in `src/audio/playback.rs` was modified. Before passing data to the `rubato` resampler, the incoming (potentially variable-sized) audio chunks are now buffered and processed into fixed-size chunks that match the resampler's requirements.
+
+**Status:** Resolved.
+
+
 ### ALSA Errors
 
 #### ALSA Underrun (EPIPE - Broken Pipe) During Playback
