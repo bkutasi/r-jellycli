@@ -77,22 +77,17 @@ impl SessionManager {
         let capabilities_payload = ClientCapabilitiesDto {
             playable_media_types: Some(vec![MediaType::Audio]),
             supported_commands: Some(vec![
-                // Populate with actual GeneralCommandType variants
-                GeneralCommandType::MoveUp,
-                GeneralCommandType::MoveDown,
-                GeneralCommandType::MoveLeft,
-                GeneralCommandType::MoveRight,
-                GeneralCommandType::PageUp,
-                GeneralCommandType::PageDown,
-                GeneralCommandType::PreviousLetter,
-                GeneralCommandType::NextLetter,
-                GeneralCommandType::ToggleOsd,
-                GeneralCommandType::ToggleContextMenu,
-                GeneralCommandType::Select,
-                GeneralCommandType::Back,
-                // Note: Playback commands (Play, Pause, Stop, etc.) are handled
-                // via different mechanisms (e.g., WebSocket PlayStateCommand)
-                // and are not part of GeneralCommandType for client capabilities reporting.
+                // Advertise specific playback control commands as requested
+                GeneralCommandType::PlayState,
+                GeneralCommandType::Play,
+                GeneralCommandType::VolumeUp,
+                GeneralCommandType::VolumeDown,
+                GeneralCommandType::ToggleMute,
+                GeneralCommandType::SetVolume,
+                GeneralCommandType::SetShuffleQueue,
+                GeneralCommandType::SetRepeatMode,
+                GeneralCommandType::PlayNext,
+                // Add other non-playback commands if needed, e.g., GoHome, Select, Back
             ]),
             supports_media_control: true,
             supports_persistent_identifier: false, // Keep this false as per previous decision

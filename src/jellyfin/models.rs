@@ -76,6 +76,7 @@ pub enum MediaType {
 /// General command types supported by the client.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum GeneralCommandType {
+    // Navigation/UI Commands (Keep existing ones)
     MoveUp,
     MoveDown,
     MoveLeft,
@@ -93,32 +94,41 @@ pub enum GeneralCommandType {
     SendString,
     GoHome,
     GoToSettings,
+    ToggleFullscreen,
+    DisplayContent,
+    GoToSearch,
+    DisplayMessage,
+    ChannelUp,
+    ChannelDown,
+    Guide,
+    ToggleStats,
+    ToggleOsdMenu,
+
+    // Playback Control Commands (Add specific ones)
+    Play,
+    Pause,
+    Stop,
+    Seek,
+    NextTrack,
+    PreviousTrack,
+    SetVolume,
     VolumeUp,
     VolumeDown,
     Mute,
     Unmute,
     ToggleMute,
-    SetVolume,
     SetAudioStreamIndex,
     SetSubtitleStreamIndex,
-    ToggleFullscreen,
-    DisplayContent,
-    GoToSearch,
-    DisplayMessage,
     SetRepeatMode,
-    ChannelUp,
-    ChannelDown,
-    Guide,
-    ToggleStats,
+    SetShuffleQueue,
+    PlayState, // Keep for incoming messages, but maybe not for advertising capabilities?
+    PlayNext, // Keep for incoming messages? Or use NextTrack? Let's keep both for now.
+
+    // Other Commands (Keep existing ones)
     PlayMediaSource,
     PlayTrailers,
-    SetShuffleQueue,
-    PlayState, // Covers Play, Pause, Stop, Seek etc.
-    PlayNext,
-    ToggleOsdMenu,
-    // Play, // Covered by PlayState? Check API usage. Let's omit for now based on spec enum.
     SetMaxStreamingBitrate,
-    SetPlaybackOrder,
+    // SetPlaybackOrder, // Seems less common for basic remote control, comment out for now
 }
 
 /// Represents the client capabilities sent to the server.
@@ -132,10 +142,10 @@ pub struct ClientCapabilitiesDto {
     pub supports_media_control: bool,
     #[serde(rename = "SupportsPersistentIdentifier")]
     pub supports_persistent_identifier: bool,
-    #[serde(rename = "DeviceProfile", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "DeviceProfile")] // Removed skip_serializing_if
     pub device_profile: Option<serde_json::Value>, // Using Value for simplicity, can be refined if needed
-    #[serde(rename = "AppStoreUrl", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "AppStoreUrl")]   // Removed skip_serializing_if
     pub app_store_url: Option<String>,
-    #[serde(rename = "IconUrl", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "IconUrl")]     // Removed skip_serializing_if
     pub icon_url: Option<String>,
 }

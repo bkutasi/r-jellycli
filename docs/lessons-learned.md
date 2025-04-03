@@ -102,6 +102,12 @@
             *   **Lesson**: When using `rubato`, ensure that incoming audio data (especially from variable sources like network streams) is buffered and processed into fixed-size chunks *before* being passed to the resampler. Proper buffer management upstream of the resampler is critical for correct operation.
             *   **Benefit**: Prevents resampling artifacts and ensures accurate playback speed when dealing with variable input buffer sizes.
 
+        5.  **Interplay Between Playback State and Shutdown Stability**:
+            *   **Problem**: Application would hang during shutdown (Ctrl+C) specifically when closing the ALSA device.
+            *   **Observation**: This hang was resolved *indirectly* after implementing fixes and refinements to the pause/resume logic within the ALSA handler.
+            *   **Lesson**: The state of the ALSA device (e.g., whether it's paused, running, drained) significantly impacts the behavior of `pcm.close()`. Issues in state management during playback (like improper handling of pause/resume) can manifest as seemingly unrelated problems during shutdown. Robust state management throughout the playback lifecycle is crucial not only for playback itself but also for ensuring clean resource release on exit.
+            *   **Benefit**: Recognizing these dependencies helps in debugging shutdown issues by considering the preceding playback state logic.
+
 1. **Thread Safety Issues**
    - **Problem**: Box<dyn StdError> was not Send + Sync safe.
    - **Solution**: Properly wrapped errors in std::io::Error with string messages instead of passing raw dynamic error types.

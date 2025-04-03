@@ -190,7 +190,7 @@ thread 'main' panicked at 'Cannot drop a runtime in a context where blocking is 
 // Or panics related to Mutex::blocking_lock
 ```
 
-**Cause**: Performing potentially blocking operations (like joining tasks, acquiring `blocking_lock` on mutexes, complex I/O) inside the `Drop` implementation of a struct that lives within an async context (managed by Tokio). The `Drop` trait is synchronous and cannot safely execute blocking code when the async runtime is potentially shutting down or from within an async task.
+**Cause**: Performing potentially blocking operations (like joining tasks, acquiring `blocking_lock` on mutexes, complex I/O such as closing ALSA devices) inside the `Drop` implementation of a struct that lives within an async context (managed by Tokio). The `Drop` trait is synchronous and cannot safely execute blocking code when the async runtime is potentially shutting down or from within an async task. This was the root cause of hangs observed during Ctrl+C shutdown when ALSA devices were being closed.
 
 **Solution**:
 1.  Avoid complex or blocking logic in `Drop` for types used in async contexts.
@@ -207,6 +207,8 @@ info!("Shutting down player...");
 player.shutdown().await;
 info!("Player shut down complete.");
 // Now `player` can be dropped safely
+
+**Status**: Resolved. Implementing the `async fn shutdown` pattern and ensuring all cleanup happens there has fixed shutdown panics and hangs, including the specific issue with ALSA device closing during Ctrl+C (which was also influenced by fixes in pause/resume logic affecting ALSA state).
 ```
 
 

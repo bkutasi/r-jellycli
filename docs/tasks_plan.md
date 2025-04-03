@@ -103,6 +103,7 @@
    - Corrected ALSA underrun (EPIPE) handling to retry writes instead of skipping data.
    - Refactored shutdown logic into `async fn shutdown` to prevent panics in `Drop`.
    - Confirmed playback pipeline (decode, resample, write) is functional.
+    - Resolved application hang on shutdown (Ctrl+C) previously caused by ALSA device closing issues, as an indirect result of pause/resume logic fixes.
    - Status: Completed
 9. **Jellyfin Remote Control State Reporting**
    - Implemented mechanism for `Player` to report state (Start, Stop, Progress) via channel to `WebSocketHandler`.

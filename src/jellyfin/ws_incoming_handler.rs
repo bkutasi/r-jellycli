@@ -104,9 +104,14 @@ pub(super) async fn handle_playstate_command(
             player_guard.stop().await;
         }
         "Seek" => {
-            // TODO: Implement Seek handling if needed
-            // Requires parsing "SeekPositionTicks" from arguments (likely in GeneralCommand format?)
-            warn!("[WS Incoming] Seek command received but not implemented.");
+            if let Some(ticks) = command.seek_position_ticks {
+                debug!("[WS Incoming] Seek to {} ticks", ticks);
+                let mut player_guard = player.lock().await;
+                // Assuming Player::seek takes ticks directly
+                player_guard.seek(ticks).await;
+            } else {
+                warn!("[WS Incoming] Seek command received without SeekPositionTicks.");
+            }
         }
         _ => {
             warn!("[WS Incoming] Unhandled PlayState command: {}", command.command);

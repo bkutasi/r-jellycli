@@ -17,7 +17,7 @@ pub struct Player {
     alsa_player: Option<Arc<TokioMutex<PlaybackOrchestrator>>>, // Use TokioMutex
     current_item_id: Option<String>,
     position_ticks: i64,
-    is_paused: bool,
+    is_paused: Arc<TokioMutex<bool>>, // Changed to shared state
     is_playing: bool,
     volume: i32,
     is_muted: bool,
@@ -45,7 +45,7 @@ impl Player {
             alsa_player: None,
             current_item_id: None,
             position_ticks: 0,
-            is_paused: false,
+            is_paused: Arc::new(TokioMutex::new(false)), // Initialize shared state
             is_playing: false,
             volume: 100,
             is_muted: false,
@@ -95,7 +95,10 @@ impl Player {
     pub fn set_current_item(&mut self, item: &MediaItem) { // Take full item
         self.current_item_id = Some(item.id.clone());
         self.position_ticks = 0;
-        self.is_paused = false;
+        // Reset pause state when setting a new item
+        let mut pause_guard = self.is_paused.blocking_lock(); // Use blocking lock as this isn't async
+        *pause_guard = false;
+        drop(pause_guard);
         self.is_playing = true;
 
         // Send Started update
@@ -120,8 +123,9 @@ impl Player {
         self.is_muted
     }
 
-    pub fn is_paused(&self) -> bool {
-        self.is_paused
+    // Make this async as it now needs to lock the mutex
+    pub async fn is_paused(&self) -> bool {
+        *self.is_paused.lock().await
     }
     // --- End Getter methods ---
 
@@ -132,7 +136,10 @@ impl Player {
         self.current_queue_index = 0;
         self.current_item_id = None;
         self.is_playing = false;
-        self.is_paused = false;
+        // Reset pause state using async lock
+        let mut pause_guard = self.is_paused.lock().await; // Use async lock
+        *pause_guard = false;
+        drop(pause_guard);
         
         // Stop current playback if any
         if let Some(alsa_player) = &self.alsa_player {
@@ -185,7 +192,8 @@ impl Player {
         // Set state *before* getting URL or reporting start
         self.current_item_id = Some(item_to_play.id.clone());
         self.position_ticks = 0;
-        self.is_paused = false; // Playback starts unpaused
+        // Reset pause state when starting new item
+        *self.is_paused.lock().await = false;
         self.is_playing = true;
 
         // --- Get Stream URL ---
@@ -224,7 +232,7 @@ impl Player {
                 media_source_id: item_to_play.id.clone(), // Use item ID as source ID like Go client
                 position_ticks: 0, // Starts at 0
                 volume_level: self.volume,
-                is_paused: self.is_paused,
+                is_paused: *self.is_paused.lock().await, // Read shared state
                 is_muted: self.is_muted,
                 play_method: "DirectPlay".to_string(),
                 play_session_id: session_id,
@@ -266,6 +274,8 @@ impl Player {
         { // Scope for MutexGuard
             let mut alsa_player_guard = alsa_player_arc.lock().await;
             alsa_player_guard.set_progress_tracker(progress_info.clone());
+            // Pass the shared pause state to the orchestrator
+            alsa_player_guard.set_pause_state(self.is_paused.clone());
         }
 
         // Create shutdown channel for this playback instance
@@ -306,12 +316,9 @@ impl Player {
             // Pass the receiver for this specific reporter
             let mut reporter_shutdown_rx_clone = reporter_shutdown_rx; // Clone receiver for the task
 
-            // Read mutable state *before* spawning the task (will be updated by player actions)
-            // We need a way to get the *current* pause/volume/mute state inside the loop.
-            // Simplest approach: Use the state captured when the task starts. This might lag slightly.
-            // A more complex approach involves channels or shared state for these too.
-            // Let's stick with the captured state for now, similar to the previous internal update approach.
-            let initial_is_paused = self.is_paused;
+            // Clone the shared pause state Arc for the reporter task
+            let pause_state_for_reporter = self.is_paused.clone();
+            // Capture volume and mute state (these don't need Arc currently)
             let initial_volume = self.volume;
             let initial_is_muted = self.is_muted;
 
@@ -342,8 +349,8 @@ impl Player {
                                     item_id: initial_item_id.clone(),
                                     media_source_id: initial_item_id.clone(),
                                     position_ticks,
-                                    volume_level: initial_volume, // Use captured state
-                                    is_paused: initial_is_paused, // Use captured state
+                                    volume_level: initial_volume, // Use captured volume
+                                    is_paused: *pause_state_for_reporter.lock().await, // Read current pause state
                                     is_muted: initial_is_muted,   // Use captured state
                                     play_method: "DirectPlay".to_string(),
                                     play_session_id: session_id.clone(),
@@ -391,9 +398,11 @@ impl Player {
     #[instrument(skip(self))]
     pub async fn play_pause(&mut self) {
         if self.is_playing {
-            if self.is_paused {
+            // Read current pause state
+            let currently_paused = *self.is_paused.lock().await;
+            if currently_paused {
                 info!("Resumed playback");
-                self.resume().await; // resume will set is_paused = false and send update
+                self.resume().await; // resume will set shared state to false and send update
             } else {
                 info!("Paused playback");
                 self.pause().await;
@@ -408,44 +417,50 @@ impl Player {
 
     #[instrument(skip(self))]
     pub async fn pause(&mut self) {
-        if !self.is_playing || self.is_paused {
-            return;
-        }
-        
-        self.is_paused = true;
+        if !self.is_playing { return; }
+        // Check current state before trying to pause
+        let mut pause_guard = self.is_paused.lock().await;
+        if *pause_guard { return; } // Already paused
+
+        *pause_guard = true; // Set shared state to paused
+        // Drop the guard before sending updates/logging to avoid holding lock
+        drop(pause_guard);
         info!("State set to paused");
         // Send progress update reflecting paused state
         if let Some(id) = self.current_item_id.clone() {
              self.send_update(PlayerStateUpdate::Progress {
                  item_id: id,
                  position_ticks: self.position_ticks,
-                 is_paused: self.is_paused, // Add player state
+                 is_paused: true, // We just paused
                  volume: self.volume,       // Add player state
                  is_muted: self.is_muted,   // Add player state
              });
         }
-        // TODO: Implement actual ALSA pause functionality here
+        // No ALSA call needed here, the playback loop handles the shared state
     }
 
     #[instrument(skip(self))]
     pub async fn resume(&mut self) {
-        if !self.is_playing || !self.is_paused {
-            return;
-        }
-        
-        self.is_paused = false;
+        if !self.is_playing { return; }
+        // Check current state before trying to resume
+        let mut pause_guard = self.is_paused.lock().await;
+        if !*pause_guard { return; } // Already playing
+
+        *pause_guard = false; // Set shared state to playing
+        // Drop the guard before sending updates/logging
+        drop(pause_guard);
         info!("State set to resumed");
         // Send progress update reflecting resumed state
         if let Some(id) = self.current_item_id.clone() {
              self.send_update(PlayerStateUpdate::Progress {
                  item_id: id,
                  position_ticks: self.position_ticks,
-                 is_paused: self.is_paused, // Add player state
+                 is_paused: false, // We just resumed
                  volume: self.volume,       // Add player state
                  is_muted: self.is_muted,   // Add player state
              });
         }
-        // TODO: Implement actual ALSA resume functionality here
+        // No ALSA call needed here, the playback loop handles the shared state
     }
 
     // Helper to stop playback tasks
@@ -519,7 +534,7 @@ impl Player {
                 media_source_id: id.clone(),
                 position_ticks: final_ticks, // Use provided final position
                 volume_level: self.volume,
-                is_paused: false, // Stopped means not paused
+                is_paused: false, // Stopped means not paused (read from shared state is unnecessary here)
                 is_muted: self.is_muted,
                 play_method: "DirectPlay".to_string(),
                 play_session_id: session_id,
@@ -573,7 +588,7 @@ impl Player {
 
         // Update state *after* stopping tasks and reporting
         self.is_playing = false;
-        self.is_paused = false;
+        *self.is_paused.lock().await = false; // Reset shared state
         self.current_item_id = None;
         self.position_ticks = 0; // Reset position after stopping
 
@@ -646,7 +661,7 @@ impl Player {
              self.send_update(PlayerStateUpdate::Progress {
                  item_id: id,
                  position_ticks: self.position_ticks,
-                 is_paused: self.is_paused, // Add player state
+                 is_paused: *self.is_paused.lock().await, // Read shared state
                  volume: self.volume,       // Add player state
                  is_muted: self.is_muted,   // Add player state
              });
@@ -700,7 +715,8 @@ impl Player {
 
         // 3. Clear remaining state (optional, as tasks are stopped)
         self.is_playing = false;
-        self.is_paused = false;
+        // Reset shared state during shutdown
+        *self.is_paused.lock().await = false;
         self.current_item_id = None;
         self.queue.clear();
         self.current_queue_index = 0;

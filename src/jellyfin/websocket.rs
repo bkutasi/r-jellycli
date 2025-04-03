@@ -413,7 +413,7 @@ impl PreparedWebSocketHandler {
                     }
                 } else { warn!("[WS Handle] GeneralCommand message missing 'Data'."); }
             }
-            "PlayState" => {
+            "PlayState" | "Playstate" => { // Handle both potential casings
                 if let Some(data) = message.data {
                      match serde_json::from_value::<PlayStateCommand>(data) {
                         Ok(cmd) => ws_incoming_handler::handle_playstate_command(cmd, player_arc).await,

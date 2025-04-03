@@ -20,6 +20,7 @@
   - Implemented clean exit handling with Ctrl+C support.
   - Refactored cleanup into `async fn shutdown` in `Player`/`PlaybackOrchestrator` to prevent panics in `Drop` related to blocking operations.
   - Application exits cleanly without panics.
+   - Resolved application hang on shutdown (Ctrl+C) previously caused by ALSA device closing issues, as an indirect result of pause/resume logic fixes.
 
 - ✅ **Jellyfin Remote Control Integration & Stable WebSocket**
   - Implemented proper client capability reporting format.

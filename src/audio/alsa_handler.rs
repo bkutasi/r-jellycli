@@ -156,6 +156,75 @@ impl AlsaPcmHandler {
         }
     }
 
+    /// Pauses the ALSA PCM device if it's running.
+    #[instrument(skip(self))]
+    pub fn pause(&self) -> Result<(), AudioError> {
+        if let Some(pcm) = &self.pcm {
+            match pcm.state() {
+                PcmState::Running => {
+                    debug!(target: LOG_TARGET, "Pausing ALSA PCM device.");
+                    match pcm.pause(true) { // true = enable pause
+                        Ok(_) => {
+                            debug!(target: LOG_TARGET, "ALSA pause successful.");
+                            Ok(())
+                        }
+                        Err(e) => {
+                            error!(target: LOG_TARGET, "Error pausing ALSA: {}", e);
+                            Err(e.into())
+                        }
+                    }
+                }
+                PcmState::Paused => {
+                    debug!(target: LOG_TARGET, "ALSA already paused, skipping pause command.");
+                    Ok(())
+                }
+                other_state => {
+                    warn!(target: LOG_TARGET, "Cannot pause ALSA in state {:?}, skipping.", other_state);
+                    // Not necessarily an error, might just be stopped/prepared
+                    Ok(())
+                }
+            }
+        } else {
+            warn!(target: LOG_TARGET, "PCM not initialized, cannot pause.");
+            Err(AudioError::InvalidState("PCM not initialized for pausing".to_string()))
+        }
+    }
+
+    /// Resumes the ALSA PCM device if it's paused.
+    #[instrument(skip(self))]
+    pub fn resume(&self) -> Result<(), AudioError> {
+        if let Some(pcm) = &self.pcm {
+            match pcm.state() {
+                PcmState::Paused => {
+                    debug!(target: LOG_TARGET, "Resuming ALSA PCM device.");
+                    match pcm.pause(false) { // false = disable pause
+                        Ok(_) => {
+                            debug!(target: LOG_TARGET, "ALSA resume successful.");
+                            Ok(())
+                        }
+                        Err(e) => {
+                            error!(target: LOG_TARGET, "Error resuming ALSA: {}", e);
+                            Err(e.into())
+                        }
+                    }
+                }
+                PcmState::Running => {
+                    debug!(target: LOG_TARGET, "ALSA already running, skipping resume command.");
+                    Ok(())
+                }
+                other_state => {
+                    warn!(target: LOG_TARGET, "Cannot resume ALSA in state {:?}, skipping.", other_state);
+                     // Not necessarily an error
+                    Ok(())
+                }
+            }
+        } else {
+            warn!(target: LOG_TARGET, "PCM not initialized, cannot resume.");
+            Err(AudioError::InvalidState("PCM not initialized for resuming".to_string()))
+        }
+    }
+
+
 
     /// Closes the ALSA PCM device if it's open, attempting to drain first.
     pub fn close(&mut self) {

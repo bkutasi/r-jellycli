@@ -47,6 +47,7 @@ pub struct PlaybackOrchestrator { // Renamed from AlsaPlayer
     // progress_bar: Option<Arc<ProgressBar>>, // Removed progress bar field
     progress_info: Option<SharedProgress>,
     resampler: Option<Arc<TokioMutex<SincFixedIn<f32>>>>,
+    pause_state: Option<Arc<TokioMutex<bool>>>, // Added: Shared pause state
 }
 
 impl PlaybackOrchestrator { // Renamed from AlsaPlayer
@@ -59,6 +60,7 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
             // progress_bar: None, // Removed progress bar initialization
             progress_info: None,
             resampler: None,
+            pause_state: None, // Initialize pause state
         }
     }
 
@@ -66,6 +68,12 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
     pub fn set_progress_tracker(&mut self, tracker: SharedProgress) {
         debug!(target: LOG_TARGET, "Progress tracker configured.");
         self.progress_info = Some(tracker);
+    }
+
+    /// Sets the shared pause state tracker.
+    pub fn set_pause_state(&mut self, state: Arc<TokioMutex<bool>>) {
+        debug!(target: LOG_TARGET, "Pause state tracker configured.");
+        self.pause_state = Some(state);
     }
 
     // --- Private Helper Methods ---
@@ -390,11 +398,117 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
         mut shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<PlaybackLoopExitReason, AudioError> { // Changed return type
         info!(target: LOG_TARGET, "Starting playback loop.");
-        let mut last_progress_update_time = Instant::now(); // Prefixed unused variable
-        let track_time_base = decoder.time_base(); // Prefixed unused variable
+        let mut last_progress_update_time = Instant::now();
+        let track_time_base = decoder.time_base();
+        let mut was_paused = false; // Track previous pause state for transitions
 
         loop {
-            trace!(target: LOG_TARGET, "--- Playback loop iteration start ---");
+            // --- Pause Check ---
+            // --- Pause Check and ALSA State Transition ---
+            if let Some(pause_state_arc) = &self.pause_state {
+                let is_paused = *pause_state_arc.lock().await;
+
+                    trace!(target: LOG_TARGET, "Pause check: is_paused = {}, was_paused = {}", is_paused, was_paused);
+                // --- Handle State Transitions ---
+                if is_paused && !was_paused {
+                    // Transition: Playing -> Paused
+                    debug!(target: LOG_TARGET, "Pause state changed: Playing -> Paused. Requesting ALSA pause.");
+                    let handler_clone = Arc::clone(&self.alsa_handler);
+                    trace!(target: LOG_TARGET, "Attempting to call alsa_handler.pause() in blocking task...");
+                    let pause_result = task::spawn_blocking(move || {
+                        match handler_clone.lock() {
+                            Ok(handler_guard) => handler_guard.pause(),
+                            Err(poisoned) => {
+                                error!(target: LOG_TARGET, "ALSA handler mutex poisoned during pause attempt: {}", poisoned);
+                                Err(AudioError::InvalidState("ALSA handler mutex poisoned".to_string()))
+                            }
+                        }
+                    }).await;
+                    trace!(target: LOG_TARGET, "ALSA pause task completed. Result: {:?}", pause_result.as_ref().map(|r| r.is_ok())); // Log before consuming
+                    if let Err(e) = pause_result.map_err(|je| AudioError::TaskJoinError(je.to_string())).and_then(|res| res) {
+                        warn!(target: LOG_TARGET, "Failed to pause ALSA device: {}", e);
+                        // Continue playback loop, but log the error. Might recover later.
+                    }
+                } else if !is_paused && was_paused {
+                    // Transition: Paused -> Playing
+                    debug!(target: LOG_TARGET, "Pause state changed: Paused -> Playing. Requesting ALSA resume.");
+                    let handler_clone = Arc::clone(&self.alsa_handler);
+                    trace!(target: LOG_TARGET, "Attempting to call alsa_handler.resume() in blocking task...");
+                    let resume_result = task::spawn_blocking(move || {
+                         match handler_clone.lock() {
+                            Ok(handler_guard) => {
+                                trace!(target: LOG_TARGET, "Inside blocking task: Calling handler_guard.resume()...");
+                                let res = handler_guard.resume();
+                                trace!(target: LOG_TARGET, "Inside blocking task: handler_guard.resume() returned: {:?}", res.as_ref().map_err(|e| format!("{:?}", e)));
+                                res
+                            }
+                            Err(poisoned) => {
+                                error!(target: LOG_TARGET, "ALSA handler mutex poisoned during resume attempt: {}", poisoned);
+                                Err(AudioError::InvalidState("ALSA handler mutex poisoned".to_string()))
+                            }
+                        }
+                    }).await;
+                    trace!(target: LOG_TARGET, "ALSA resume task completed. Result: {:?}", resume_result.as_ref().map(|r| r.is_ok())); // Log before consuming
+                     if let Err(e) = resume_result.map_err(|je| AudioError::TaskJoinError(je.to_string())).and_then(|res| res) {
+                        warn!(target: LOG_TARGET, "Failed to resume ALSA device: {}", e);
+                        // Continue playback loop, but log the error.
+                    }
+                }
+                was_paused = is_paused; // Update state *after* handling transition
+
+                // --- Wait While Paused ---
+                if is_paused {
+                    loop { // Inner loop to wait while paused *after* ALSA pause command sent
+                        trace!(target: LOG_TARGET, "Entering wait loop (is_paused = true)");
+                        trace!(target: LOG_TARGET, "Playback paused (ALSA pause requested), waiting...");
+                        // Re-check pause state and shutdown signal
+                        let current_pause_state = *pause_state_arc.lock().await;
+                        if !current_pause_state {
+                            debug!(target: LOG_TARGET, "Pause state changed: Paused -> Playing (detected in wait loop). Requesting ALSA resume.");
+                            // --- Call Resume Logic Directly ---
+                            let handler_clone = Arc::clone(&self.alsa_handler);
+                            trace!(target: LOG_TARGET, "Attempting to call alsa_handler.resume() in blocking task (from wait loop)...");
+                            let resume_result = task::spawn_blocking(move || {
+                                 match handler_clone.lock() {
+                                    Ok(handler_guard) => {
+                                        trace!(target: LOG_TARGET, "Inside blocking task: Calling handler_guard.resume()...");
+                                        let res = handler_guard.resume();
+                                        trace!(target: LOG_TARGET, "Inside blocking task: handler_guard.resume() returned: {:?}", res.as_ref().map_err(|e| format!("{:?}", e)));
+                                        res
+                                    }
+                                    Err(poisoned) => {
+                                        error!(target: LOG_TARGET, "ALSA handler mutex poisoned during resume attempt: {}", poisoned);
+                                        Err(AudioError::InvalidState("ALSA handler mutex poisoned".to_string()))
+                                    }
+                                }
+                            }).await;
+                            trace!(target: LOG_TARGET, "ALSA resume task completed (from wait loop). Result: {:?}", resume_result.as_ref().map(|r| r.is_ok()));
+                             if let Err(e) = resume_result.map_err(|je| AudioError::TaskJoinError(je.to_string())).and_then(|res| res) {
+                                warn!(target: LOG_TARGET, "Failed to resume ALSA device (from wait loop): {}", e);
+                                // Continue playback loop, but log the error.
+                            }
+                            // --- End Resume Logic ---
+                            was_paused = false; // Update was_paused immediately since we handled the transition
+                            trace!(target: LOG_TARGET, "Exiting wait loop after handling resume.");
+                            break; // Break inner wait loop
+                        }
+
+                        tokio::select! {
+                            biased; // Prioritize shutdown check
+                            _ = shutdown_rx.recv() => {
+                                info!(target: LOG_TARGET, "Shutdown signal received while paused.");
+                                return Ok(PlaybackLoopExitReason::ShutdownSignal);
+                            }
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                                // Continue the inner pause-checking loop
+                            }
+                        }
+                    }
+                }
+            }
+            // --- End Pause Check ---
+
+            trace!(target: LOG_TARGET, "--- Playback loop iteration start (after pause check) ---");
             // --- Decode Next Frame (Owned) ---
             let decode_result = decoder.decode_next_frame_owned(&mut shutdown_rx).await;
             // Adjust trace log for new enum structure
