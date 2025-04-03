@@ -686,11 +686,14 @@ if decoder_rate != actual_rate {
         // self._update_progress(pb, current_ts, track_time_base, last_progress_update_time).await; // Removed progress update call
 
         let s16_vec: Vec<i16>;
+        const RESAMPLER_CHUNK_SIZE: usize = 1024; // Must match initialization
 
         // --- Resampling Logic ---
         if let Some(resampler_arc) = self.resampler.as_ref() {
             let mut resampler = resampler_arc.lock().await;
-            trace!(target: LOG_TARGET, "Resampling buffer...");
+            trace!(target: LOG_TARGET, "Resampling buffer in chunks...");
+
+            // 1. Convert the entire input buffer to f32 vectors first
             let f32_input_vecs = match self._convert_buffer_to_f32_vecs(audio_buffer) {
                 Ok(vecs) => vecs,
                 Err(e) => {
@@ -699,22 +702,73 @@ if decoder_rate != actual_rate {
                 }
             };
 
-            match (&mut *resampler).process(&f32_input_vecs, None) {
-                Ok(f32_output_vecs) => {
-                    trace!(target: LOG_TARGET, "Resampling successful, got {} output frames.", f32_output_vecs.get(0).map_or(0, |v| v.len()));
-                    s16_vec = match self._convert_f32_vecs_to_s16(f32_output_vecs) {
-                        Ok(vec) => vec,
-                        Err(e) => {
-                            warn!(target: LOG_TARGET, "Failed to convert resampled F32 buffer to S16: {}. Skipping buffer.", e);
-                            return Ok(None); // Indicate skip
-                        }
-                    };
+            if f32_input_vecs.is_empty() || f32_input_vecs[0].is_empty() {
+                trace!(target: LOG_TARGET, "Input buffer is empty after F32 conversion, skipping resampling.");
+                return Ok(None);
+            }
+
+            let num_channels = f32_input_vecs.len();
+            let total_input_frames = f32_input_vecs[0].len();
+            let mut processed_frames = 0;
+            let mut accumulated_output_vecs: Vec<Vec<f32>> = vec![Vec::new(); num_channels]; // Initialize output accumulator
+
+            // 2. Process the f32 input vectors in fixed chunks
+            while processed_frames < total_input_frames {
+                let remaining_frames = total_input_frames - processed_frames;
+                let current_chunk_size = remaining_frames.min(RESAMPLER_CHUNK_SIZE);
+                let end_frame = processed_frames + current_chunk_size;
+
+                // Create the input chunk for the resampler
+                let mut input_chunk: Vec<&[f32]> = Vec::with_capacity(num_channels);
+                for ch in 0..num_channels {
+                    // Ensure we don't slice beyond the bounds of the input vector
+                    if processed_frames < f32_input_vecs[ch].len() && end_frame <= f32_input_vecs[ch].len() {
+                         input_chunk.push(&f32_input_vecs[ch][processed_frames..end_frame]);
+                    } else {
+                        // This case should ideally not happen if conversion is correct, but handle defensively
+                        error!(target: LOG_TARGET, "Inconsistent input vector length detected during chunking at channel {}, frame {}", ch, processed_frames);
+                        // Push an empty slice or handle error appropriately
+                        input_chunk.push(&[]);
+                    }
                 }
+
+
+                trace!(target: LOG_TARGET, "Processing chunk: frames {}..{} (size {})", processed_frames, end_frame - 1, current_chunk_size);
+
+                // Process the chunk
+                match resampler.process(&input_chunk, None) {
+                    Ok(output_chunk) => {
+                        if !output_chunk.is_empty() && !output_chunk[0].is_empty() {
+                            trace!(target: LOG_TARGET, "Resampler output chunk size: {} frames", output_chunk[0].len());
+                            // Append the output chunk to the accumulated vectors
+                            for ch in 0..num_channels {
+                                if ch < output_chunk.len() { // Check channel exists in output
+                                    accumulated_output_vecs[ch].extend_from_slice(&output_chunk[ch]);
+                                }
+                            }
+                        } else {
+                             trace!(target: LOG_TARGET, "Resampler output chunk is empty.");
+                        }
+                    }
+                    Err(e) => {
+                        error!(target: LOG_TARGET, "Resampling failed during chunk processing: {}", e);
+                        // Decide how to handle: skip entire buffer or just this chunk? Let's skip the buffer.
+                        return Ok(None); // Indicate skip for the whole buffer on chunk error
+                    }
+                }
+                processed_frames = end_frame;
+            }
+
+            // 3. Convert the accumulated resampled f32 vectors to s16
+            trace!(target: LOG_TARGET, "Converting accumulated resampled output ({} frames) to S16...", accumulated_output_vecs.get(0).map_or(0, |v| v.len()));
+            s16_vec = match self._convert_f32_vecs_to_s16(accumulated_output_vecs) {
+                Ok(vec) => vec,
                 Err(e) => {
-                    error!(target: LOG_TARGET, "Resampling failed: {}", e);
+                    warn!(target: LOG_TARGET, "Failed to convert accumulated resampled F32 buffer to S16: {}. Skipping buffer.", e);
                     return Ok(None); // Indicate skip
                 }
-            }
+            };
+
         } else { // No resampler needed
             trace!(target: LOG_TARGET, "No resampling needed, converting directly to S16...");
             s16_vec = match self._convert_buffer_to_s16(audio_buffer) {
