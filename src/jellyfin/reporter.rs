@@ -6,7 +6,7 @@ use crate::jellyfin::models::MediaItem;
 
 pub use crate::jellyfin::models_playback::{
     PlaybackReportBase, QueueItem, PlaybackStartReport, PlaybackStopReport,
-    PlaybackStoppedInfoInner, PlaybackProgressReport,
+    PlaybackStoppedInfoInner, PlaybackProgressReport, CapabilitiesReport,
 };
 
 const REPORTER_LOG_TARGET: &str = "r_jellycli::jellyfin::reporter";
@@ -51,7 +51,7 @@ impl JellyfinReporter {
 
         Some(PlaybackReportBase {
             queueable_media_types: vec!["Audio".to_string()],
-            can_seek: false,
+            can_seek: true, // We now report Seek capability
             item_id: item_id.clone(),
             media_source_id: item_id.clone(),
             position_ticks: state.position_ticks,
@@ -141,6 +141,37 @@ impl JellyfinReporter {
             Err(e) => {
                 error!(target: REPORTER_LOG_TARGET, "Failed to report playback progress: {}", e);
             }
+        }
+    }
+    /// Reports client capabilities to the Jellyfin server.
+    #[instrument(skip(self))]
+    pub async fn report_capabilities(&self) {
+        info!(target: REPORTER_LOG_TARGET, "Reporting client capabilities...");
+
+        let supported_commands = vec![
+            "PlayNow".to_string(),
+            "Queue".to_string(),
+            "Stop".to_string(),
+            "PlayPause".to_string(),
+            "Next".to_string(),
+            "Previous".to_string(),
+            // Add other confirmed commands here if discovered
+        ];
+
+        let capabilities = CapabilitiesReport {
+            playable_media_types: vec!["Audio".to_string()],
+            supported_commands,
+            supports_media_control: true, // Assuming control is supported
+            supports_persistent_identifier: false,
+            device_profile: None, // Added based on updated spec
+            app_store_url: None, // Added based on updated spec
+            icon_url: None, // Added based on updated spec
+            // Removed queueable_media_types, application_version, client, device_name, device_id
+        };
+
+        match self.jellyfin_client.report_capabilities(&capabilities).await {
+            Ok(_) => info!(target: REPORTER_LOG_TARGET, "Successfully reported capabilities."),
+            Err(e) => error!(target: REPORTER_LOG_TARGET, "Failed to report capabilities: {}", e),
         }
     }
 }

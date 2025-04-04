@@ -70,22 +70,38 @@ impl SessionManager {
         let capabilities_payload = ClientCapabilitiesDto {
             playable_media_types: Some(vec![MediaType::Audio]),
             supported_commands: Some(vec![
-                // Advertise specific playback control commands as requested
-                GeneralCommandType::PlayState,
+                // Basic Playback
                 GeneralCommandType::Play,
+                GeneralCommandType::Pause,
+                GeneralCommandType::Stop,
+                GeneralCommandType::Seek,
+                GeneralCommandType::PlayState, // Reports current state
+                // Track Navigation
+                GeneralCommandType::NextTrack,
+                GeneralCommandType::PreviousTrack,
+                GeneralCommandType::PlayNext, // Plays specific item next
+                // Volume Control
+                GeneralCommandType::SetVolume,
+                GeneralCommandType::VolumeUp,
+                GeneralCommandType::VolumeDown,
+                GeneralCommandType::Mute,
+                GeneralCommandType::Unmute,
+                GeneralCommandType::ToggleMute,
+                // Queue Control
                 GeneralCommandType::SetShuffleQueue,
                 GeneralCommandType::SetRepeatMode,
-                GeneralCommandType::PlayNext,
+                // Other useful commands
+                GeneralCommandType::DisplayMessage, // For potential feedback
             ]),
-            supports_media_control: true,
-            supports_persistent_identifier: false,
-            device_profile: None,
-            app_store_url: None,
-            icon_url: None,
+            supports_media_control: true, // Essential for remote control
+            supports_persistent_identifier: false, // Standard for most clients
+            device_profile: Some(serde_json::json!({
+                "Name": "r-jellycli Audio Player",
+            })),
         };
 
         // Log the JSON being sent using debug level
-        debug!("[SESSION] Sending capabilities JSON payload:\n{}",
+        debug!("Sending capabilities JSON payload:\n{}",
             serde_json::to_string_pretty(&capabilities_payload).unwrap_or_else(|e| format!("<JSON serialization error: {}>", e))
         );
 
@@ -121,16 +137,5 @@ impl SessionManager {
             Ok(())
         }
     }
-    
-    
-    
-    
-    /// Get the device ID
-    #[allow(dead_code)]
-    pub fn get_device_id(&self) -> String {
-        self.device_id.clone()
-    }
-    
-    
     
 }

@@ -70,6 +70,28 @@ pub struct PlaybackStartReport {
     pub base: PlaybackReportBase,
 }
 
+
+
+/// Represents the full capabilities report sent to the server.
+/// POST /Sessions/Capabilities/Full
+/// Matches the structure used in the Go example's `ReportCapabilities`.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct CapabilitiesReport {
+    pub playable_media_types: Vec<String>, // e.g., ["Audio"]
+    // pub queueable_media_types: Vec<String>, // Removed based on updated spec
+    pub supported_commands: Vec<String>, // Commands this client actually supports
+    pub supports_media_control: bool,
+    pub supports_persistent_identifier: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_profile: Option<serde_json::Value>, // Added based on updated spec (structure unknown)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_store_url: Option<String>, // Added based on updated spec
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>, // Added based on updated spec
+    // Removed application_version, client, device_name, device_id based on updated spec
+}
+
 // --- Structures for convenience (might be used internally before creating reports) ---
 
 /// Simplified info for internal state tracking or function arguments.

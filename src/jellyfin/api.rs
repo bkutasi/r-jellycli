@@ -1,9 +1,13 @@
-//! Jellyfin API client implementation
+
+/// Jellyfin API client implementation
 
 use crate::player::{PlayerCommand, InternalPlayerStateUpdate};
-use crate::jellyfin::{PlaybackStartReport, PlaybackProgressReport, PlaybackStopReport};
+use crate::jellyfin::{PlaybackStartReport, PlaybackProgressReport, PlaybackStopReport, CapabilitiesReport};
 use serde::Serialize;
 
+use serde_json::json;
+
+const API_LOG_TARGET: &str = "r_jellycli::jellyfin::api";
 use tracing::{debug, info, warn, error, trace};
 use tracing::instrument;
 use crate::jellyfin::models::{ItemsResponse, MediaItem, AuthResponse};
@@ -88,6 +92,7 @@ pub trait JellyfinApiContract: Send + Sync {
     async fn report_playback_stopped(&self, report: &PlaybackStopReport) -> Result<(), JellyfinError>;
     async fn report_playback_progress(&self, report: &PlaybackProgressReport) -> Result<(), JellyfinError>;
     fn play_session_id(&self) -> &str;
+    async fn report_capabilities(&self, report: &CapabilitiesReport) -> Result<(), JellyfinError>;
 }
 
 // --- JellyfinClient Implementation ---
@@ -152,13 +157,7 @@ impl JellyfinClient {
     /// Builds a full URL for an API endpoint path.
     fn build_url(&self, path: &str) -> String {
         format!("{}{}", self.server_url, path)
-
-
-
-
     }
-
-
 
     /// Checks if the client has authentication credentials.
     fn ensure_authenticated(&self) -> Result<(&str, &str), JellyfinError> {
@@ -209,8 +208,9 @@ impl JellyfinClient {
     }
 
     /// Sends a POST request with a JSON body and expects a 204 No Content on success.
-    async fn _post_json_no_content<T: Serialize>(&self, path: &str, body: &T) -> Result<(), JellyfinError> {
+    async fn _post_json_no_content<T: Serialize + std::fmt::Debug>(&self, path: &str, body: &T) -> Result<(), JellyfinError> {
         let (api_key, _) = self.ensure_authenticated()?;
+        debug!(target: API_LOG_TARGET, "POST JSON body for {}: {:?}", path, body);
         let url = self.build_url(path);
         debug!("Sending POST request with JSON body to: {}", url);
 
@@ -276,22 +276,7 @@ impl JellyfinClient {
         }
     }
 
-    /// Reports capabilities using the SessionManager.
-    async fn _report_capabilities(&self, session_manager: &SessionManager) -> Result<(), JellyfinError> {
-        debug!("Reporting capabilities...");
-        match session_manager.report_capabilities().await {
-            Ok(()) => {
-                info!("Capabilities reported successfully.");
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to report capabilities: {:?}", e);
-                // Assuming SessionManager::report_capabilities returns reqwest::Error or similar
-                Err(JellyfinError::Other(format!("Failed to report capabilities: {}", e)))
-            }
-        }
-    }
-
+    // Removed private _report_capabilities helper, using public method now.
     /// Initializes the WebSocket handler, connects, and starts the listener task.
     async fn _initialize_websocket(
         &mut self,
@@ -367,10 +352,25 @@ impl JellyfinClient {
             self.play_session_id.clone(),
         );
 
-        // Report capabilities first
-        self._report_capabilities(&session_manager).await?;
+        // Report capabilities first using the public method
+        // Removed unused device_name variable based on CapabilitiesReport changes
 
-        // Store session manager
+        let capabilities = CapabilitiesReport {
+            playable_media_types: vec!["Audio".to_string()],
+            supported_commands: vec![
+                "PlayNow".to_string(), 
+                "PlayPause".to_string(),
+            ],
+            supports_media_control: true,
+            supports_persistent_identifier: false,
+            device_profile: None, // Added based on updated spec
+            app_store_url: None, // Added based on updated spec
+            icon_url: None, // Added based on updated spec
+            // Removed queueable_media_types, application_version, client, device_name, device_id
+        };
+        self.report_capabilities(&capabilities).await?;
+
+        // Keep SessionManager for potential future use, but it's not used for capability reporting now.
         self.session_manager = Some(session_manager);
         debug!("Session manager created and stored.");
 
@@ -457,6 +457,13 @@ impl JellyfinClient {
     pub async fn report_playback_stopped(&self, report: &PlaybackStopReport) -> Result<(), JellyfinError> {
         info!("Reporting playback stopped for item_id: {}", report.base.item_id);
         self._post_json_no_content("/Sessions/Playing/Stopped", report).await
+    }
+
+    /// Report client capabilities to Jellyfin server via HTTP POST.
+    #[instrument(skip(self, report))]
+    pub async fn report_capabilities(&self, report: &CapabilitiesReport) -> Result<(), JellyfinError> {
+        info!("Reporting client capabilities");
+        self._post_json_no_content("/Sessions/Capabilities/Full", &json!({"capabilities": report})).await
     }
 
 
@@ -570,5 +577,9 @@ impl JellyfinApiContract for JellyfinClient {
     fn play_session_id(&self) -> &str {
         JellyfinClient::play_session_id(self)
     }
+    async fn report_capabilities(&self, report: &CapabilitiesReport) -> Result<(), JellyfinError> {
+        JellyfinClient::report_capabilities(self, report).await
+    }
 }
+
 
