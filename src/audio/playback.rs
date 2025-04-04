@@ -2,14 +2,14 @@ use tracing::trace;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex as StdMutex}; // Keep std Mutex for AlsaPcmHandler
 use tokio::sync::{broadcast, Mutex as TokioMutex};
-use rubato::{SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+// use rubato::{SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction}; // Removed - Unused import
 use crate::audio::{
     alsa_handler::AlsaPcmHandler,
     alsa_writer::AlsaWriter,
     decoder::SymphoniaDecoder,
     error::AudioError,
     loop_runner::{PlaybackLoopExitReason, PlaybackLoopRunner},
-    processor::AudioProcessor,
+    // processor::AudioProcessor, // Removed - Unused import
     progress::{SharedProgress},
     state_manager::{OnFinishCallback, PlaybackStateManager},
     stream_wrapper::ReqwestStreamWrapper,
@@ -107,41 +107,25 @@ impl PlaybackOrchestrator {
 
         // --- Symphonia Decoder Setup ---
         let decoder = SymphoniaDecoder::new(mss)?;
-        let initial_spec = decoder.initial_spec().ok_or(AudioError::InitializationError("Decoder failed to provide initial spec".to_string()))?;
-        let num_channels = initial_spec.channels.count();
+        // let initial_spec = decoder.current_spec().ok_or(AudioError::InitializationError("Decoder failed to provide initial spec".to_string()))?; // Use current_spec
+        // Spec is now determined *inside* the loop runner after the first frame decode.
+        // let num_channels = initial_spec.channels.count(); // Determined inside loop runner
 
         // --- ALSA Initialization & Get Actual Rate ---
-        // Lock the mutex to initialize and get the rate
-        let actual_rate = {
-            let mut handler_guard = self.alsa_handler.lock().map_err(|e| AudioError::InvalidState(format!("ALSA handler mutex poisoned on init: {}", e)))?; // Lock the mutex to initialize and get the rate
-            handler_guard.initialize(initial_spec)?;
-            handler_guard.get_actual_rate().ok_or_else(|| AudioError::InitializationError("ALSA handler did not return actual rate after initialization".to_string()))?
-        };
-        debug!(target: LOG_TARGET, "Decoder rate: {}, ALSA actual rate: {}", initial_spec.rate, actual_rate);
+        // This logic is now moved inside PlaybackLoopRunner::run
+        // let actual_rate = { ... };
+        // debug!(target: LOG_TARGET, "Decoder rate: {}, ALSA actual rate: {}", initial_spec.rate, actual_rate);
 
         // --- Resampler Setup (Conditional) ---
-        let decoder_rate = initial_spec.rate;
-        let resampler_instance: Option<Arc<TokioMutex<SincFixedIn<f32>>>> = if decoder_rate != actual_rate {
-            info!(target: LOG_TARGET, "Sample rate mismatch (Decoder: {}, ALSA: {}). Initializing resampler.", decoder_rate, actual_rate);
-            let params = SincInterpolationParameters {
-                sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
-                oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
-            };
-            let chunk_size = 512;
-            let resampler = SincFixedIn::<f32>::new(
-                actual_rate as f64 / decoder_rate as f64, 2.0, params, chunk_size, num_channels,
-            ).map_err(|e| AudioError::InitializationError(format!("Failed to create resampler: {}", e)))?;
-            Some(Arc::new(TokioMutex::new(resampler)))
-        } else {
-            info!(target: LOG_TARGET, "Sample rates match ({} Hz). Resampling disabled.", actual_rate);
-            None
-        };
+        // This logic is now moved inside PlaybackLoopRunner::run
+        // let decoder_rate = initial_spec.rate;
+        // let resampler_instance: Option<Arc<TokioMutex<SincFixedIn<f32>>>> = if decoder_rate != actual_rate { ... };
 
         // --- Create Components ---
         let alsa_writer = Arc::new(AlsaWriter::new(Arc::clone(&self.alsa_handler)));
         self.alsa_writer = Some(Arc::clone(&alsa_writer));
 
-        let processor = Arc::new(AudioProcessor::new(resampler_instance, num_channels));
+        // let processor = Arc::new(AudioProcessor::new(resampler_instance, num_channels)); // Moved inside loop runner
 
         // Configure State Manager (already created in `new`, just configure it)
         {
@@ -157,7 +141,8 @@ impl PlaybackOrchestrator {
         // --- Create and Spawn Playback Loop Runner ---
         let loop_runner = PlaybackLoopRunner::new(
             decoder,
-            processor,
+            // processor, // Removed - created inside runner
+            Arc::clone(&self.alsa_handler), // Pass the handler instead
             alsa_writer,
             Arc::clone(&self.state_manager),
             shutdown_rx,

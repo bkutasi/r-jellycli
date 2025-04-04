@@ -2,7 +2,8 @@ use crate::audio::{
     error::AudioError,
     sample_converter,
 };
-use rubato::{Resampler, SincFixedIn};
+use rubato::Resampler;
+use rubato::SincFixedIn;
 use std::sync::Arc;
 use symphonia::core::{
     audio::{AudioBuffer, Signal},
@@ -28,10 +29,11 @@ impl AudioProcessor {
 
     /// Processes an audio buffer: resamples (if configured) and converts to S16.
     /// Returns `Ok(None)` if the buffer should be skipped (e.g., conversion error, empty buffer).
-    #[instrument(skip(self, audio_buffer), fields(buffer_type = std::any::type_name::<S>(), frames = audio_buffer.frames()))]
+    #[instrument(skip(self, audio_buffer), fields(buffer_type = std::any::type_name::<S>(), frames = audio_buffer.frames(), is_last))]
     pub async fn process_buffer<S: Sample + std::fmt::Debug + Send + Sync + 'static>(
         &self,
         audio_buffer: AudioBuffer<S>,
+        is_last: bool, // Added flag
     ) -> Result<Option<Vec<i16>>, AudioError> {
         trace!(target: LOG_TARGET, "Processing buffer: {} frames", audio_buffer.frames());
 
@@ -40,7 +42,7 @@ impl AudioProcessor {
         // --- Resampling Logic ---
         if let Some(resampler_arc) = self.resampler.as_ref() {
             let mut resampler = resampler_arc.lock().await;
-            trace!(target: LOG_TARGET, "Resampling buffer...");
+            trace!(target: LOG_TARGET, "Resampling buffer (is_last: {})...", is_last);
 
             // 1. Convert the entire input buffer to f32 vectors first
             let f32_input_vecs = match sample_converter::convert_buffer_to_f32_vecs(audio_buffer) {
@@ -61,51 +63,79 @@ impl AudioProcessor {
             let mut processed_frames = 0;
             let mut accumulated_output_vecs: Vec<Vec<f32>> = vec![Vec::new(); num_channels];
 
-            // 2. Process the f32 input vectors in chunks
-            // Use input_frames_next() to determine how many frames the resampler needs
-            while processed_frames < total_input_frames {
-                 let needed_input_frames = resampler.input_frames_next();
-                 let remaining_frames = total_input_frames - processed_frames;
-                 let current_chunk_size = remaining_frames.min(needed_input_frames);
+            // 2. Process based on whether this is the last buffer
+            if is_last {
+                // Process the entire remaining buffer at once and flush
+                trace!(target: LOG_TARGET, "Processing last buffer ({} frames) with process_last...", total_input_frames);
+                // Convert Vec<Vec<f32>> to Vec<&[f32]> for process_partial
+                let input_slices: Vec<&[f32]> = f32_input_vecs.iter().map(|v| v.as_slice()).collect();
 
-                if current_chunk_size == 0 {
-                    trace!(target: LOG_TARGET, "No more input frames to process in this loop iteration.");
-                    break;
-                }
-
-                let end_frame = processed_frames + current_chunk_size;
-
-                let mut input_chunk: Vec<&[f32]> = Vec::with_capacity(num_channels);
-                for ch in 0..num_channels {
-                     if processed_frames < f32_input_vecs[ch].len() && end_frame <= f32_input_vecs[ch].len() {
-                        input_chunk.push(&f32_input_vecs[ch][processed_frames..end_frame]);
-                    } else {
-                        error!(target: LOG_TARGET, "Inconsistent input vector length during chunking at channel {}, frame {}. Input len: {}, end_frame: {}", ch, processed_frames, f32_input_vecs[ch].len(), end_frame);
-                        input_chunk.push(&[]);
-                    }
-                }
-
-                trace!(target: LOG_TARGET, "Processing chunk: frames {}..{} (size {})", processed_frames, end_frame - 1, current_chunk_size);
-
-                match resampler.process(&input_chunk, None) {
+                let resampler_mut = &mut *resampler; // Explicit mutable dereference
+                // Use process_partial for the last chunk
+                match resampler_mut.process_partial(Some(&input_slices), None) {
                     Ok(output_chunk) => {
                         if !output_chunk.is_empty() && !output_chunk[0].is_empty() {
-                            trace!(target: LOG_TARGET, "Resampler output chunk size: {} frames", output_chunk[0].len());
-                            for ch in 0..num_channels {
-                                if ch < output_chunk.len() {
-                                    accumulated_output_vecs[ch].extend_from_slice(&output_chunk[ch]);
-                                }
-                            }
+                            trace!(target: LOG_TARGET, "Resampler process_last output size: {} frames", output_chunk[0].len());
+                            // Directly assign, as this is the final output
+                            accumulated_output_vecs = output_chunk;
                         } else {
-                             trace!(target: LOG_TARGET, "Resampler output chunk is empty.");
+                             trace!(target: LOG_TARGET, "Resampler process_last output is empty.");
+                             // Ensure accumulated_output_vecs is empty if output is empty
+                             accumulated_output_vecs.iter_mut().for_each(|v| v.clear());
                         }
                     }
                     Err(e) => {
-                        error!(target: LOG_TARGET, "Resampling failed during chunk processing: {}", e);
+                        error!(target: LOG_TARGET, "Resampling failed during process_last: {}", e);
+                        // Treat as skippable error for now, might need better handling
                         return Ok(None);
                     }
                 }
-                processed_frames = end_frame;
+            } else {
+                // Process the f32 input vectors in chunks (existing logic)
+                while processed_frames < total_input_frames {
+                    let needed_input_frames = resampler.input_frames_next();
+                    let remaining_frames = total_input_frames - processed_frames;
+                    let current_chunk_size = remaining_frames.min(needed_input_frames);
+
+                    if current_chunk_size == 0 {
+                        trace!(target: LOG_TARGET, "No more input frames to process in this loop iteration.");
+                        break;
+                    }
+
+                    let end_frame = processed_frames + current_chunk_size;
+
+                    let mut input_chunk: Vec<&[f32]> = Vec::with_capacity(num_channels);
+                    for ch in 0..num_channels {
+                        if processed_frames < f32_input_vecs[ch].len() && end_frame <= f32_input_vecs[ch].len() {
+                            input_chunk.push(&f32_input_vecs[ch][processed_frames..end_frame]);
+                        } else {
+                            error!(target: LOG_TARGET, "Inconsistent input vector length during chunking at channel {}, frame {}. Input len: {}, end_frame: {}", ch, processed_frames, f32_input_vecs[ch].len(), end_frame);
+                            input_chunk.push(&[]); // Push empty slice on error to match expected structure
+                        }
+                    }
+
+                    trace!(target: LOG_TARGET, "Processing chunk: frames {}..{} (size {})", processed_frames, end_frame - 1, current_chunk_size);
+
+                    match resampler.process(&input_chunk, None) {
+                        Ok(output_chunk) => {
+                            if !output_chunk.is_empty() && !output_chunk[0].is_empty() {
+                                trace!(target: LOG_TARGET, "Resampler output chunk size: {} frames", output_chunk[0].len());
+                                for ch in 0..num_channels {
+                                    if ch < output_chunk.len() && ch < accumulated_output_vecs.len() { // Bounds check
+                                        accumulated_output_vecs[ch].extend_from_slice(&output_chunk[ch]);
+                                    }
+                                }
+                            } else {
+                                trace!(target: LOG_TARGET, "Resampler output chunk is empty.");
+                            }
+                        }
+                        Err(e) => {
+                            error!(target: LOG_TARGET, "Resampling failed during chunk processing: {}", e);
+                            return Ok(None); // Treat as skippable error
+                        }
+                    }
+                    processed_frames = end_frame;
+                }
             }
 
             // 3. Convert the accumulated resampled f32 vectors to s16
@@ -139,48 +169,10 @@ impl AudioProcessor {
         Ok(Some(s16_vec))
     }
 
-    /// Flushes the resampler (if it exists) and returns the final S16 samples.
-    /// Returns `Ok(None)` if no resampler exists or flushing yields no data/error.
-    #[instrument(skip(self))]
-    pub async fn flush_resampler(&self) -> Result<Option<Vec<i16>>, AudioError> {
-        if let Some(resampler_arc) = self.resampler.as_ref() {
-            let mut resampler = resampler_arc.lock().await;
-            trace!(target: LOG_TARGET, "Flushing resampler...");
-
-            // Flush by processing empty input slices
-            let empty_inputs: Vec<&[f32]> = vec![&[]; self.num_channels]; // Use stored channel count
-            match resampler.process(&empty_inputs, None) {
-                Ok(f32_output_vecs) => {
-                    if !f32_output_vecs.is_empty() && !f32_output_vecs[0].is_empty() {
-                        trace!(target: LOG_TARGET, "Resampler flush successful, got {} output frames.", f32_output_vecs.get(0).map_or(0, |v| v.len()));
-                        match sample_converter::convert_f32_vecs_to_s16(f32_output_vecs) {
-                            Ok(s16_vec) => {
-                                if s16_vec.is_empty() {
-                                    trace!(target: LOG_TARGET, "Flushed resampler buffer converted to empty S16 buffer.");
-                                    Ok(None)
-                                } else {
-                                    trace!(target: LOG_TARGET, "Returning flushed S16 buffer ({} samples).", s16_vec.len());
-                                    Ok(Some(s16_vec))
-                                }
-                            }
-                            Err(e) => {
-                                error!(target: LOG_TARGET, "Failed to convert flushed resampler buffer to S16: {}", e);
-                                Err(e)
-                            }
-                        }
-                    } else {
-                        trace!(target: LOG_TARGET, "Resampler flush returned no frames.");
-                        Ok(None)
-                    }
-                }
-                Err(e) => {
-                    error!(target: LOG_TARGET, "Resampler flush (process with empty input) failed: {}", e);
-                    Err(AudioError::ResamplingError(format!("Resampler flush failed: {}", e)))
-                }
-            }
-        } else {
-            trace!(target: LOG_TARGET, "No resampler active, no flush needed.");
-            Ok(None)
-        }
+    /// Returns the number of output channels the processor is configured for.
+    pub fn output_channels(&self) -> usize {
+        self.num_channels
     }
+
+    // Removed flush_resampler function as process_last handles flushing.
 }

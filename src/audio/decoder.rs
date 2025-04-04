@@ -32,7 +32,7 @@ pub struct SymphoniaDecoder {
     decoder: Option<Box<dyn Decoder>>,
     track_id: u32,
     track_time_base: Option<TimeBase>,
-    initial_spec: Option<SignalSpec>,
+    current_spec: Option<SignalSpec>, // Renamed from initial_spec
     sample_format: Option<symphonia::core::sample::SampleFormat>, // Added field
 }
 
@@ -97,23 +97,22 @@ impl SymphoniaDecoder {
         decoder.reset();
         debug!(target: LOG_TARGET, "Decoder reset after creation.");
 
-        // Store the initial signal specification.
-        let initial_spec = SignalSpec::new(
-            track.codec_params.sample_rate.ok_or(AudioError::MissingCodecParams("sample rate"))?,
-            track.codec_params.channels.ok_or(AudioError::MissingCodecParams("channels map"))?,
-        ); // Store the initial signal specification.
+        // Store the current signal specification (might be incomplete initially).
+        let sample_rate = track.codec_params.sample_rate.ok_or(AudioError::MissingCodecParams("sample rate"))?;
+        let channels = track.codec_params.channels; // Don't error if None yet
+        let current_spec = channels.map(|chans| SignalSpec::new(sample_rate, chans));
         let sample_format = track.codec_params.sample_format;
 
-        debug!(target: LOG_TARGET, "Symphonia decoder created successfully. Initial Spec: {:?}, Sample Format: {:?}", initial_spec, sample_format);
+        debug!(target: LOG_TARGET, "Symphonia decoder created. Spec (potentially incomplete): {:?}, Sample Format: {:?}", current_spec, sample_format);
 
         Ok(Self {
             format_reader: Some(format_reader),
             decoder: Some(decoder),
             track_id: track.id,
             track_time_base: track.codec_params.time_base,
-            initial_spec: Some(initial_spec),
+            current_spec, // Store the potentially incomplete spec
             sample_format,
-        }) // End Ok(Self { ... })
+        })
     }
 
 /// Returns the sample format of the decoded audio track.
@@ -121,9 +120,9 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
     self.sample_format
 }
 
-    /// Returns the initial signal specification detected.
-    pub fn initial_spec(&self) -> Option<SignalSpec> {
-        self.initial_spec
+    /// Returns the current signal specification (might be updated after first decode).
+    pub fn current_spec(&self) -> Option<SignalSpec> {
+        self.current_spec
     }
 
     /// Returns the time base of the decoded track.
@@ -397,6 +396,28 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
             match decode_result_from_task {
                  // Successfully decoded and converted to owned buffer
                  Ok(owned_buffer_ts) => {
+                    // --- Update spec if needed ---
+                    // Check if the current spec is missing channel info
+                    if self.current_spec.map_or(true, |spec| spec.channels.count() == 0) {
+                        // Extract spec from the decoded buffer
+                        let decoded_spec = match &owned_buffer_ts {
+                             DecodedBufferAndTimestamp::U8(buf, _) => buf.spec(),
+                             DecodedBufferAndTimestamp::S16(buf, _) => buf.spec(),
+                             DecodedBufferAndTimestamp::S24(buf, _) => buf.spec(),
+                             DecodedBufferAndTimestamp::S32(buf, _) => buf.spec(),
+                             DecodedBufferAndTimestamp::F32(buf, _) => buf.spec(),
+                             DecodedBufferAndTimestamp::F64(buf, _) => buf.spec(),
+                        };
+                        // Update self.current_spec if the decoded spec has channels
+                        if decoded_spec.channels.count() > 0 {
+                             debug!(target: LOG_TARGET, "Updating decoder spec with info from first decoded frame: {:?}", decoded_spec);
+                             self.current_spec = Some(*decoded_spec); // Dereference the spec
+                        } else {
+                             warn!(target: LOG_TARGET, "First decoded frame still missing channel info in spec: {:?}", decoded_spec);
+                        }
+                    }
+                    // --- End Update spec ---
+
                     // Restore ownership before returning success
                     self.format_reader = Some(format_reader);
                     self.decoder = Some(decoder);

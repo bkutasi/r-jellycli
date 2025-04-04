@@ -1,7 +1,7 @@
-use crate::player::{Player, PlayerCommand, InternalPlayerStateUpdate, PLAYER_LOG_TARGET, audio_task_manager};
+use crate::player::{Player, InternalPlayerStateUpdate, PLAYER_LOG_TARGET, audio_task_manager};
 use crate::jellyfin::models::MediaItem;
 use crate::audio::PlaybackProgressInfo;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, trace};
 
 struct PlaybackPreparation {
     item_to_play: MediaItem,
@@ -52,13 +52,14 @@ async fn initiate_audio_task(
 ) {
     *player.is_paused.lock().await = false;
 
-    let internal_cmd_tx = player.internal_command_tx.clone();
     let item_id_for_callback = item_to_play.id.clone();
+    // This callback is passed to the audio task manager.
+    // The audio task manager's *internal* callback is now solely responsible
+    // for sending the TrackFinished command upon natural completion.
+    // We keep this Box::new(|| {}) structure in case other logic needs
+    // to be added here later, but it no longer sends the command itself.
     let on_finish_callback: Box<dyn FnOnce() + Send + Sync + 'static> = Box::new(move || {
-        info!(target: PLAYER_LOG_TARGET, item_id=%item_id_for_callback, "Audio task finished track naturally. Sending TrackFinished command.");
-        if let Err(e) = internal_cmd_tx.try_send(PlayerCommand::TrackFinished) {
-             error!(target: PLAYER_LOG_TARGET, item_id=%item_id_for_callback, "Failed to send TrackFinished command: {}", e);
-        }
+        trace!(target: PLAYER_LOG_TARGET, item_id=%item_id_for_callback, "Placeholder on_finish_callback executed (no command sent).");
     });
 
     let manager = audio_task_manager::spawn_playback_task(

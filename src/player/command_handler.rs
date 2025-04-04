@@ -179,8 +179,16 @@ pub async fn handle_previous(player: &mut Player) {
 }
 
 
-#[instrument(skip(player))]
+#[instrument(skip(player), fields(is_handling = player.is_handling_track_finish))]
 pub async fn handle_track_finished(player: &mut Player) {
+    // --- State Lock ---
+    if player.is_handling_track_finish {
+        warn!(target: PLAYER_LOG_TARGET, "TrackFinished received while already handling a previous finish. Ignoring.");
+        return;
+    }
+    player.is_handling_track_finish = true;
+    // --- End State Lock ---
+
     info!(target: PLAYER_LOG_TARGET, "Handling TrackFinished internal command.");
     let _final_position = player.get_current_position().await;
 
@@ -197,8 +205,10 @@ pub async fn handle_track_finished(player: &mut Player) {
         player.current_queue_index += 1;
         info!(target: PLAYER_LOG_TARGET, "Track finished, advancing to index {}.", player.current_queue_index);
         playback_starter::play_current_item(player, true).await;
+        player.is_handling_track_finish = false; // Release lock after starting next
     } else {
         info!(target: PLAYER_LOG_TARGET, "Track finished, end of queue reached.");
         player.broadcast_update(InternalPlayerStateUpdate::Stopped);
+        player.is_handling_track_finish = false; // Release lock at end of queue
     }
 }

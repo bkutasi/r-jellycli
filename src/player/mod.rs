@@ -38,6 +38,7 @@ pub struct Player {
     current_progress: SharedProgress,
     audio_task_manager: Option<audio_task_manager::AudioTaskManager>,
     reporter: JellyfinReporter,
+    is_handling_track_finish: bool, // Flag to prevent concurrent track finish handling
 }
 
 const PLAYER_LOG_TARGET: &str = "r_jellycli::player";
@@ -78,6 +79,7 @@ impl Player {
             current_progress: current_progress_arc,
             audio_task_manager: None,
             reporter: JellyfinReporter::new(jellyfin_client.clone()),
+            is_handling_track_finish: false,
         };
 
         (player, command_tx)

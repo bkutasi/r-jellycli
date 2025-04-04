@@ -210,7 +210,7 @@ impl JellyfinClient {
     /// Sends a POST request with a JSON body and expects a 204 No Content on success.
     async fn _post_json_no_content<T: Serialize + std::fmt::Debug>(&self, path: &str, body: &T) -> Result<(), JellyfinError> {
         let (api_key, _) = self.ensure_authenticated()?;
-        debug!(target: API_LOG_TARGET, "POST JSON body for {}: {:?}", path, body);
+        trace!(target: API_LOG_TARGET, "POST JSON body for {}: {:?}", path, body);
         let url = self.build_url(path);
         debug!("Sending POST request with JSON body to: {}", url);
 
