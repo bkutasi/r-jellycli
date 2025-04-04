@@ -36,13 +36,14 @@ pub async fn run_player_loop(player: &mut Player) {
                     PlayerCommand::TrackFinished => command_handler::handle_track_finished(player).await,
                     PlayerCommand::Shutdown => {
                         info!(target: PLAYER_LOG_TARGET, "Shutdown command received. Exiting run loop.");
-                        // Stop playback implicitly by stopping the audio task manager
-                        let mut stopped_item_id: Option<String> = None; // Initialize Option
-                        if let Some(manager) = player.audio_task_manager.take() {
-                             info!(target: PLAYER_LOG_TARGET, "Stopping audio task manager due to Shutdown command.");
-                             stopped_item_id = Some(manager.item_id().to_string()); // Use getter and convert to String
-                             manager.stop_task().await;
-                        }
+                        // Stop playback implicitly by breaking the loop.
+                        // The audio task manager will be stopped in the final cleanup section.
+                        let stopped_item_id = player.current_item_id.clone(); // Get ID before clearing state
+                        // if let Some(manager) = player.audio_task_manager.take() { // REMOVED - Handled after loop
+                        //      info!(target: PLAYER_LOG_TARGET, "Stopping audio task manager due to Shutdown command.");
+                        //      stopped_item_id = Some(manager.item_id().to_string());
+                        //      manager.stop_task().await;
+                        // }
                         // Update state after stopping
                         player.is_playing = false;
                         *player.is_paused.lock().await = false;
@@ -124,10 +125,16 @@ pub async fn run_player_loop(player: &mut Player) {
     }
 
     info!(target: PLAYER_LOG_TARGET, "Player run loop finished. Performing final cleanup.");
-    // Ensure audio task is stopped on exit, regardless of reason
+    // 1. Ensure any active audio task is stopped
     if let Some(manager) = player.audio_task_manager.take() {
          info!(target: PLAYER_LOG_TARGET, "Stopping active audio task manager during final cleanup.");
-         manager.stop_task().await;
+         manager.stop_task().await; // Await task completion
+    }
+    // 2. Explicitly shut down the shared audio backend
+    info!(target: PLAYER_LOG_TARGET, "Shutting down shared audio backend...");
+    match player.audio_backend.lock().await.shutdown().await {
+        Ok(_) => info!(target: PLAYER_LOG_TARGET, "Shared audio backend shutdown successful."),
+        Err(e) => error!(target: PLAYER_LOG_TARGET, "Error shutting down shared audio backend: {}", e),
     }
     info!(target: PLAYER_LOG_TARGET, "Player task cleanup complete.");
 }

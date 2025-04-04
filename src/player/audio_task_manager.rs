@@ -30,21 +30,36 @@ impl AudioTaskManager {
     /// Waits for the managed task to complete with a timeout.
     /// Consumes the manager instance.
     #[instrument(skip(self), fields(item_id = %self.item_id))]
-    pub async fn await_completion(self) {
+    pub async fn await_completion(mut self) { // Keep consuming self, but make it mutable
         debug!(target: PLAYER_LOG_TARGET, "Waiting for audio task to finish...");
-        let timeout_duration = StdDuration::from_secs(2); // Reduced timeout to 2s for faster exit on Ctrl+C
-        match tokio::time::timeout(timeout_duration, self.task_handle).await {
-            Ok(Ok(())) => {
-                info!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Audio task finished gracefully.");
+        let timeout_duration = StdDuration::from_secs(5); // Increased timeout to 5s
+
+        // Use select! to race the handle against the timeout without moving the handle
+        tokio::select! {
+            biased; // Prioritize checking the result if ready
+            result = &mut self.task_handle => { // Poll the handle directly by mutable reference
+                match result {
+                    Ok(()) => {
+                        info!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Audio task finished gracefully.");
+                    }
+                    Err(e) => {
+                        // Log if it's a panic; JoinError occurs on panic or cancellation.
+                        if e.is_panic() {
+                             error!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Audio task panicked: {:?}", e);
+                        } else if e.is_cancelled() {
+                             info!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Audio task was cancelled (likely aborted after timeout).");
+                        } else {
+                             error!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Audio task join error: {:?}", e);
+                        }
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                error!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Audio task panicked: {:?}", e);
-                // Propagate panic? Or just log?
-            }
-            Err(_) => {
-                error!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Timeout waiting for audio task to finish after {:?}. Task might be stuck.", timeout_duration);
-                // Consider aborting the handle if timeout occurs?
-                // self.task_handle.abort(); // Aborting is unstable and might leave resources hanging
+            _ = tokio::time::sleep(timeout_duration) => {
+                error!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "Timeout waiting for audio task to finish after {:?}. Aborting task.", timeout_duration);
+                // Now we still own self.task_handle here because it wasn't moved into timeout()
+                self.task_handle.abort();
+                // Optionally, await briefly after abort to see if it results in a cancelled error, but not strictly necessary.
+                // Let's just log the abort and the subsequent join result will indicate cancellation if successful.
             }
         }
     }
@@ -72,9 +87,9 @@ impl AudioTaskManager {
 }
 
 /// Spawns a new Tokio task to handle audio playback.
-#[instrument(skip(backend, on_finish_callback, internal_cmd_tx), fields(item_id = %item_id_clone, stream_url = %stream_url_clone))]
+#[instrument(skip(shared_backend, on_finish_callback, internal_cmd_tx), fields(item_id = %item_id_clone, stream_url = %stream_url_clone))]
 pub fn spawn_playback_task(
-    mut backend: Box<dyn AudioPlaybackControl>, // Takes ownership of the backend
+    shared_backend: std::sync::Arc<tokio::sync::Mutex<crate::audio::PlaybackOrchestrator>>, // Use shared backend type
     stream_url_clone: String,
     item_id_clone: String,
     item_runtime_ticks: Option<i64>,
@@ -87,7 +102,7 @@ pub fn spawn_playback_task(
     info!(target: PLAYER_LOG_TARGET, "Spawning async task for audio playback of item {}", item_id_clone);
     let task_handle = tokio::spawn(async move {
         // This async block runs in a separate Tokio task.
-        // It owns the `backend` instance.
+        // It uses the shared `shared_backend` instance via Arc clone.
         let task_item_id = item_id_clone.clone(); // Clone for logging within the task
         debug!(target: PLAYER_LOG_TARGET, item_id = %task_item_id, "[Audio Task] Started.");
 
@@ -109,9 +124,13 @@ pub fn spawn_playback_task(
         // Call the backend's async play method
         // The shutdown_rx is now handled internally by the backend implementation (e.g., playback_loop)
         // Pass the actual shutdown_rx to the backend's play method
-        let play_result = backend
-            .play(&stream_url_clone, item_runtime_ticks, finish_callback_for_task, shutdown_rx) // Pass shutdown_rx
-            .await;
+        // Lock the shared backend to call play
+        let play_result = {
+            let mut backend_guard = shared_backend.lock().await;
+            backend_guard
+                .play(&stream_url_clone, item_runtime_ticks, finish_callback_for_task, shutdown_rx) // Pass shutdown_rx
+                .await
+        }; // Mutex guard is dropped here
 
         // --- Task Cleanup (within the spawned task) ---
         match play_result {
@@ -120,13 +139,9 @@ pub fn spawn_playback_task(
             // TODO: Consider sending an error update back to the main Player task?
         }
 
-        // Explicitly shutdown the backend instance within the task before exiting.
-        debug!(target: PLAYER_LOG_TARGET, item_id = %task_item_id, "[Audio Task] Shutting down backend instance...");
-        if let Err(e) = backend.shutdown().await {
-            error!(target: PLAYER_LOG_TARGET, item_id = %task_item_id, "[Audio Task] Error shutting down audio backend instance: {}", e);
-        } else {
-            info!(target: PLAYER_LOG_TARGET, item_id = %task_item_id, "[Audio Task] Backend instance shutdown complete.");
-        }
+        // DO NOT explicitly shutdown the backend instance here.
+        // Its lifecycle is managed by the Player struct that holds the Arc.
+        debug!(target: PLAYER_LOG_TARGET, item_id = %task_item_id, "[Audio Task] Playback loop finished or errored.");
         debug!(target: PLAYER_LOG_TARGET, item_id = %task_item_id, "[Audio Task] Finished.");
         // Task implicitly returns ()
     });

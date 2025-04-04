@@ -19,6 +19,7 @@ pub enum AudioError {
     PlaybackError(String), // Added for general playback issues
     ResamplingError(String), // Added for resampling errors
     UnsupportedOperation(String), // Added for operations not supported by the backend
+    ShutdownRequested,     // Playback was stopped by a shutdown signal
 }
 
 impl std::fmt::Display for AudioError {
@@ -38,6 +39,7 @@ impl std::fmt::Display for AudioError {
             AudioError::PlaybackError(e) => write!(f, "Playback error: {}", e), // Added display for PlaybackError
             AudioError::ResamplingError(e) => write!(f, "Resampling error: {}", e), // Added display for ResamplingError
             AudioError::UnsupportedOperation(e) => write!(f, "Unsupported operation: {}", e), // Added display for UnsupportedOperation
+            AudioError::ShutdownRequested => write!(f, "Playback stopped due to shutdown signal"),
         }
     }
 }

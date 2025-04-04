@@ -150,8 +150,8 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
         while offset < total_frames {
             // Check shutdown before potentially blocking
             if shutdown_rx.try_recv().is_ok() {
-                info!(target: LOG_TARGET, "Shutdown signal received during ALSA write loop.");
-                return Ok(());
+                info!(target: LOG_TARGET, "Shutdown signal received during ALSA write loop. Returning ShutdownRequested.");
+                return Err(AudioError::ShutdownRequested); // Return specific error
             }
 
             let frames_remaining = total_frames - offset;
@@ -428,8 +428,15 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                     // Use the original num_channels, as resampling preserves channel count
                     trace!(target: LOG_TARGET, "Calling _write_to_alsa with {} interleaved frames...", s16_vec.len() / num_channels);
                     if let Err(e) = self._write_to_alsa(&s16_vec, num_channels, &mut shutdown_rx).await {
+                        // Handle ShutdownRequested specifically
+                        if matches!(e, AudioError::ShutdownRequested) {
+                            info!(target: LOG_TARGET, "Shutdown requested during ALSA write, exiting playback loop.");
+                            return Ok(PlaybackLoopExitReason::ShutdownSignal);
+                        }
+                        // Handle other errors
+                        error!(target: LOG_TARGET, "ALSA Write Error: {}", e);
                         // pb.abandon_with_message(format!("ALSA Write Error: {}", e)); // Removed pb call
-                        return Err(e);
+                        return Err(e); // Propagate other errors
                     }
                 }
                 Ok(DecodeRefResult::Skipped(reason)) => {

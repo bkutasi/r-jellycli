@@ -55,7 +55,7 @@ async fn prepare_playback(player: &mut Player) -> Result<PlaybackPreparation, ()
 #[instrument(skip(player, backend, item_to_play, stream_url), fields(item_id = %item_to_play.id))]
 async fn initiate_audio_task(
     player: &mut Player,
-    backend: Box<dyn crate::audio::playback::AudioPlaybackControl>, // Explicit path
+    backend: std::sync::Arc<tokio::sync::Mutex<crate::audio::PlaybackOrchestrator>>, // Use the shared backend type
     item_to_play: MediaItem,
     stream_url: String,
 ) {
@@ -122,10 +122,10 @@ pub async fn play_current_item(player: &mut Player, _is_track_change: bool) {
     // Prepare playback (validate index, get URL)
     match prepare_playback(player).await {
         Ok(preparation) => {
-            // Create the audio backend instance *after* potential errors in prepare_playback
-            let backend = player.create_audio_backend();
-            // Initiate the audio task
-            initiate_audio_task(player, backend, preparation.item_to_play, preparation.stream_url).await;
+            // Get a clone of the shared audio backend Arc
+            let shared_backend = player.audio_backend.clone();
+            // Initiate the audio task, passing the shared backend
+            initiate_audio_task(player, shared_backend, preparation.item_to_play, preparation.stream_url).await;
         }
         Err(_) => {
             // Error already handled and broadcasted within prepare_playback

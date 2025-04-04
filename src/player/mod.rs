@@ -34,7 +34,7 @@ pub use state::{PlayerCommand, InternalPlayerState, InternalPlayerStateUpdate};
 pub struct Player {
     // --- Configuration ---
     jellyfin_client: Arc<dyn JellyfinApiContract>, // Use Arc<dyn Trait>
-    alsa_device_name: String,        // Device to use for audio backend
+    // alsa_device_name: String, // Removed - Only needed during backend creation
 
     // --- State ---
     queue: Vec<MediaItem>,
@@ -54,8 +54,8 @@ pub struct Player {
     internal_command_tx: mpsc::Sender<PlayerCommand>,
 
     // --- Audio Backend ---
-    // Holds the active audio backend instance (created on play, destroyed on stop)
-    _audio_backend: Option<Box<dyn AudioPlaybackControl>>, // Prefixed unused field
+    // Shared audio backend instance, initialized once and reused.
+    audio_backend: Arc<TokioMutex<PlaybackOrchestrator>>,
     // Shared progress state passed to the audio backend
     current_progress: SharedProgress,
     // Manages the currently running audio playback task
@@ -70,28 +70,39 @@ impl Player {
     /// The Player itself should be run in a separate task using `Player::run`.
     pub fn new(
         jellyfin_client: Arc<dyn JellyfinApiContract>, // Use Arc<dyn Trait>
-        alsa_device_name: String,
+        alsa_device_name: String, // Keep param for backend creation, but don't store in Player
         state_update_capacity: usize, // Capacity for the state broadcast channel
         command_buffer_size: usize,   // Capacity for the command mpsc channel
     ) -> (Self, mpsc::Sender<PlayerCommand>) {
         let (command_tx, command_rx) = mpsc::channel(command_buffer_size);
         let (state_update_tx, _) = broadcast::channel(state_update_capacity);
 
+        // Create shared state Arcs first
+        let is_paused_arc = Arc::new(TokioMutex::new(false));
+        let current_progress_arc = Arc::new(TokioMutex::new(PlaybackProgressInfo::default()));
+
+        // Create and configure the single PlaybackOrchestrator instance
+        info!(target: PLAYER_LOG_TARGET, "Creating shared PlaybackOrchestrator for device: {}", alsa_device_name);
+        let mut backend_instance = PlaybackOrchestrator::new(&alsa_device_name);
+        backend_instance.set_pause_state_tracker(is_paused_arc.clone());
+        backend_instance.set_progress_tracker(current_progress_arc.clone());
+
+        // Wrap the configured backend instance in Arc<TokioMutex<...>>
+        let shared_audio_backend = Arc::new(TokioMutex::new(backend_instance));
+
         let player = Player {
             jellyfin_client: jellyfin_client.clone(), // Clone Arc for struct field
-            alsa_device_name,
+            // alsa_device_name, // Removed field
             queue: Vec::new(),
             current_queue_index: 0,
             current_item_id: None,
             is_playing: false,
-            is_paused: Arc::new(TokioMutex::new(false)),
-            // volume: 100, // Default volume removed
-            // is_muted: false, // removed
+            is_paused: is_paused_arc, // Use the created Arc
             command_rx,
             state_update_tx: state_update_tx.clone(), // Clone sender for internal use
             internal_command_tx: command_tx.clone(), // Clone sender for internal commands
-            _audio_backend: None, // Match field name with underscore prefix
-            current_progress: Arc::new(TokioMutex::new(PlaybackProgressInfo::default())),
+            audio_backend: shared_audio_backend, // Store the shared backend
+            current_progress: current_progress_arc, // Use the created Arc
             audio_task_manager: None, // Initialize the new manager field
             reporter: JellyfinReporter::new(jellyfin_client.clone()), // Initialize reporter
         };
@@ -116,15 +127,7 @@ impl Player {
         }
     }
 
-    /// Creates and initializes a new audio backend instance.
-    fn create_audio_backend(&self) -> Box<dyn AudioPlaybackControl> {
-        info!(target: PLAYER_LOG_TARGET, "Creating new audio backend (PlaybackOrchestrator) for device: {}", self.alsa_device_name);
-        let mut backend = Box::new(PlaybackOrchestrator::new(&self.alsa_device_name));
-        // Pass shared state trackers to the backend
-        backend.set_pause_state_tracker(self.is_paused.clone());
-        backend.set_progress_tracker(self.current_progress.clone());
-        backend
-    }
+    // Removed obsolete create_audio_backend method
 
     // stop_audio_backend logic moved to AudioTaskManager::stop_task
 
