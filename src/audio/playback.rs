@@ -455,9 +455,11 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                         // Explicitly get mutable reference and use UFCS for trait method call
                         // Get mutable reference before the match
                         // Get mutable reference for the match expression below
-                        let resampler_instance = &mut *resampler;
-                        // Flush the resampler by processing an empty input
-                        match resampler_instance.process(&[vec![]], None) {
+                       let resampler_instance = &mut *resampler;
+                       // Flush the resampler by processing empty input slices for each channel
+                       let num_channels = resampler_instance.nbr_channels();
+                       let empty_inputs: Vec<&[f32]> = vec![&[]; num_channels];
+                       match resampler_instance.process(&empty_inputs, None) {
                             Ok(f32_output_vecs) => {
                                 if !f32_output_vecs.is_empty() && !f32_output_vecs[0].is_empty() {
                                     trace!(target: LOG_TARGET, "Resampler flush successful, got {} output frames.", f32_output_vecs.get(0).map_or(0, |v| v.len()));
@@ -570,7 +572,7 @@ if decoder_rate != actual_rate {
         oversampling_factor: 256, // Higher means better quality
         window: WindowFunction::BlackmanHarris2, // Good quality window function
     };
-    let chunk_size = 1024; // Process in chunks
+    let chunk_size = 512; // Process in chunks (aligned with ALSA period)
     let resampler = SincFixedIn::<f32>::new(
         actual_rate as f64 / decoder_rate as f64, // ratio = target_rate / source_rate
         2.0, // max_resample_ratio_difference - allow some flexibility
@@ -723,7 +725,6 @@ if decoder_rate != actual_rate {
         self._update_progress(current_ts, track_time_base, last_progress_update_time).await; // Uncommented and removed pb arg
 
         let s16_vec: Vec<i16>;
-        const RESAMPLER_CHUNK_SIZE: usize = 1024; // Must match initialization
 
         // --- Resampling Logic ---
         if let Some(resampler_arc) = self.resampler.as_ref() {
@@ -749,10 +750,18 @@ if decoder_rate != actual_rate {
             let mut processed_frames = 0;
             let mut accumulated_output_vecs: Vec<Vec<f32>> = vec![Vec::new(); num_channels]; // Initialize output accumulator
 
-            // 2. Process the f32 input vectors in fixed chunks
+            // 2. Process the f32 input vectors in fixed chunks matching the resampler's internal chunk size
+            let needed_input_frames = resampler.input_frames_next(); // Use input_frames_next() again
             while processed_frames < total_input_frames {
                 let remaining_frames = total_input_frames - processed_frames;
-                let current_chunk_size = remaining_frames.min(RESAMPLER_CHUNK_SIZE);
+                let current_chunk_size = remaining_frames.min(needed_input_frames);
+
+                // If the chunk size is 0, break the loop
+                if current_chunk_size == 0 {
+                    trace!(target: LOG_TARGET, "No more input frames to process.");
+                    break;
+                }
+
                 let end_frame = processed_frames + current_chunk_size;
 
                 // Create the input chunk for the resampler
@@ -760,11 +769,11 @@ if decoder_rate != actual_rate {
                 for ch in 0..num_channels {
                     // Ensure we don't slice beyond the bounds of the input vector
                     if processed_frames < f32_input_vecs[ch].len() && end_frame <= f32_input_vecs[ch].len() {
-                         input_chunk.push(&f32_input_vecs[ch][processed_frames..end_frame]);
+                        input_chunk.push(&f32_input_vecs[ch][processed_frames..end_frame]);
                     } else {
                         // This case should ideally not happen if conversion is correct, but handle defensively
-                        error!(target: LOG_TARGET, "Inconsistent input vector length detected during chunking at channel {}, frame {}", ch, processed_frames);
-                        // Push an empty slice or handle error appropriately
+                        error!(target: LOG_TARGET, "Inconsistent input vector length detected during chunking at channel {}, frame {}. Input len: {}, end_frame: {}", ch, processed_frames, f32_input_vecs[ch].len(), end_frame);
+                        // Push an empty slice to avoid panic, error will likely occur in resampler.process
                         input_chunk.push(&[]);
                     }
                 }
