@@ -12,6 +12,13 @@ pub struct PlaybackProgressInfo {
     pub total_seconds: Option<f64>,
 }
 
+impl PlaybackProgressInfo {
+    /// Converts the current playback position from seconds to Jellyfin Ticks (10,000,000 ticks per second).
+    pub fn get_position_ticks(&self) -> i64 {
+        (self.current_seconds * 10_000_000.0) as i64
+    }
+}
+
 pub type SharedProgress = Arc<TokioMutex<PlaybackProgressInfo>>;
 
 // Potentially add helper functions here later if needed, e.g., for updating progress

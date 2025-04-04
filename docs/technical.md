@@ -110,7 +110,7 @@ RUST_LOG=debug cargo run -- --server-url ...
   - `alsa_handler.rs`: Low-level ALSA PCM interaction.
   - `format_converter.rs`: Sample format conversion utilities (including resampling via `rubato`).
   - `sample_converter.rs`: Lower-level sample conversion logic.
-  - `progress.rs`: Playback progress tracking structures and logic.
+  - `progress.rs`: Defines the `PlaybackProgressInfo` struct and the `SharedProgress` type alias (`Arc<TokioMutex<PlaybackProgressInfo>>`) for thread-safe sharing of live progress data.
   - `error.rs`: Audio-specific error types.
 - `src/config/`: Configuration management (`mod.rs`, `settings.rs`).
 - `src/jellyfin/`: Jellyfin API client implementation:
@@ -121,6 +121,7 @@ RUST_LOG=debug cargo run -- --server-url ...
   - `session.rs`: Session management.
   - `websocket.rs`: WebSocket connection management and outgoing message handling.
   - `ws_incoming_handler.rs`: Logic for handling incoming WebSocket messages.
+  - `reporter.rs`: Contains functions (`report_playback_start`, `report_playback_progress`, `report_playback_stopped`) that construct report bodies and call the corresponding `JellyfinApiContract` methods for sending HTTP POST requests.
 - `src/ui/`: Command-line interface and user interaction (`mod.rs`, `cli.rs`).
 - `tests/`: Contains integration and manual tests.
 
@@ -133,15 +134,20 @@ RUST_LOG=debug cargo run -- --server-url ...
 4. Application parses JSON into `MediaItem` structures.
 5. Media items are displayed to user for selection.
 
-### Audio Playback
+### Audio Playback and Reporting
 1. ALSA device is opened and configured based on settings.
 2. Streaming URL is obtained via `JellyfinClient::get_stream_url`.
-3. Audio data is streamed from the URL using `reqwest`.
-4. Streamed data is decoded using Symphonia (`decoder.rs`).
-5. If necessary, audio is resampled using `rubato` (`format_converter.rs`) to match the ALSA device's sample rate.
-6. Processed audio data is written to the ALSA device (`alsa_handler.rs`).
-7. Playback state (Start, Progress, Stop) is reported back to the Jellyfin server via HTTP POST requests (`api.rs`).
-
+3. The `Player` spawns the audio processing task (`audio_task_manager.rs`).
+4. The audio task streams data from the URL (`reqwest`), decodes it (`decoder.rs`), potentially resamples it (`format_converter.rs`), and writes it to ALSA (`alsa_writer.rs`).
+5. During decoding, the audio task (via `state_manager.rs`) frequently updates the `current_seconds` in the shared `SharedProgress` (`Arc<TokioMutex<PlaybackProgressInfo>>`).
+6. Simultaneously, the `Player` spawns a dedicated reporting task (`run_reporting_task` defined in `src/player/mod.rs`).
+7. The `Player` sends initial state and subsequent updates (pause, volume changes, etc.) to the reporting task via an `mpsc` channel (`ReportingCommand`).
+8. The reporting task periodically (using `tokio::time::interval`) or upon receiving specific commands:
+   a. Reads the latest player state received via the channel.
+   b. Reads the *live* `current_seconds` by locking the `SharedProgress` mutex.
+   c. Constructs the appropriate report body (`PlaybackStartInfoBody`, `PlaybackProgressInfoBody`, `PlaybackStopInfoBody`).
+   d. Calls the relevant function in `src/jellyfin/reporter.rs` (e.g., `report_playback_progress`).
+   e. The reporter function calls the corresponding method on the `JellyfinApiContract` trait (implemented by `src/jellyfin/api.rs`), which sends the HTTP POST request to the Jellyfin server.
 ## Testing Strategy
 
 ### Unit Testing

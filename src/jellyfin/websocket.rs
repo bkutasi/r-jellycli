@@ -367,6 +367,17 @@ impl PreparedWebSocketHandler {
              InternalPlayerStateUpdate::Error(err_msg) => {
                  error!("[WS Update] Received player error state: {}", err_msg);
             }
+            // Add arms for Volume/Mute changes (if WS updates are needed)
+            InternalPlayerStateUpdate::VolumeChanged { volume_level } => {
+                debug!("[WS Update] State: VolumeChanged to {}", volume_level);
+                // TODO: Send WS message if needed (e.g., UserDataChanged?)
+                // todo!();
+            }
+            InternalPlayerStateUpdate::MuteStatusChanged { is_muted } => {
+                debug!("[WS Update] State: MuteStatusChanged to {}", is_muted);
+                // TODO: Send WS message if needed (e.g., UserDataChanged?)
+                // todo!();
+            }
         }
         Ok(())
     }

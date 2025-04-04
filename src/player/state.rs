@@ -12,6 +12,8 @@ pub enum PlayerCommand {
     Previous,
     GetFullState(oneshot::Sender<InternalPlayerState>),
     TrackFinished,
+    SetVolume(u32),
+    ToggleMute,
     Shutdown,
 }
 
@@ -19,8 +21,10 @@ pub enum PlayerCommand {
 #[derive(Debug, Clone)]
 pub struct InternalPlayerState {
     pub is_playing: bool,
-    pub is_paused: bool,
-    pub current_item: Option<MediaItem>,
+    pub is_paused: bool, // Already present
+    pub is_muted: bool,  // Added for reporting
+    pub volume_level: u32, // Added for reporting (e.g., 0-100)
+    pub current_item: Option<MediaItem>, // Contains item details including ID
     pub position_ticks: i64,
     pub queue_ids: Vec<String>,
     pub current_queue_index: usize,
@@ -49,6 +53,12 @@ pub enum InternalPlayerStateUpdate {
     QueueChanged {
         queue_ids: Vec<String>,
         current_index: usize,
+    },
+    VolumeChanged { // Added for reporting/UI updates
+        volume_level: u32,
+    },
+    MuteStatusChanged { // Added for reporting/UI updates
+        is_muted: bool,
     },
     Error(String),
 }

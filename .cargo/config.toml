@@ -1,4 +1,4 @@
 [env]
 ALSA_DEVICE = "hw:Loopback,0,0"
-RUST_LOG = "r_jellycli=debug,r_jellycli::jellyfin::websocket=info,r_jellycli::jellyfin::api=debug,r_jellycli::audio::decoder=debug"
+RUST_LOG = "r_jellycli=debug,r_jellycli::jellyfin::websocket=info,r_jellycli::jellyfin::api=debug,r_jellycli::audio::decoder=debug,r_jellycli::audio::state_manager=trace"
 # AUTO_SELECT_OPTION="1"

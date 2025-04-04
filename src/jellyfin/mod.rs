@@ -4,7 +4,7 @@ pub mod api;
 mod auth;
 pub mod models;
 pub mod models_playback;
-mod session;
+pub mod session;
 pub mod websocket;
 mod ws_incoming_handler;
 pub mod reporter;

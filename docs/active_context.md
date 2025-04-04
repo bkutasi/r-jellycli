@@ -29,15 +29,22 @@
 - ✅ **Audio Subsystem Refactoring & Bug Fixes**
   - Refactored `src/audio/playback.rs` into smaller, more focused modules (`alsa_writer.rs`, `processor.rs`, `state_manager.rs`, `loop_runner.rs`) for improved maintainability.
   - Resolved build errors and runtime playback issues (e.g., premature task termination) identified during refactoring.
+
+- ✅ **Playback Progress Reporting Refactoring & Debugging**
+  - Refactored the progress reporting mechanism to use a dedicated asynchronous task (`run_reporting_task`).
+  - Implemented communication between the main player loop and the reporting task using an `mpsc` channel (`ReportingCommand`).
+  - Utilized shared state (`SharedProgress` via `Arc<TokioMutex<...>>`) for the reporting task to access live playback position updates from the audio loop.
+  - Debugged and resolved issues related to timing, state synchronization, and accurate reporting of start, progress (including initial 0-tick report), and stop events.
 **Current State Summary**:
 - Core audio playback is functional.
 - Remote control commands `PlayNow` and `Stop` are implemented and working correctly.
 - Application shutdown is stable and graceful.
 - WebSocket connection and session reporting are stable.
 - Capabilities reporting is corrected.
+- Playback progress reporting mechanism is refactored, stable, and accurately reflects playback state to the Jellyfin server.
 
 **Next Steps**:
 1.  **Implement Remaining Playback Controls**: Add ALSA-level implementation for pause, seek, and volume control, and integrate them with the `Player` and HTTP/WebSocket communication as needed.
 2.  **Refine Buffering/Error Handling**: Improve robustness of the audio streaming and playback pipeline.
 3.  **Address Other Tasks**: Continue with tasks as per `docs/tasks_plan.md`.
-4.  **Documentation**: Continue updating documentation to reflect the current state.
+4.  **Documentation**: Continue updating documentation to reflect the current state (this task).

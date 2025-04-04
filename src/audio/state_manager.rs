@@ -17,7 +17,7 @@ pub struct PlaybackStateManager {
     progress_info: Option<SharedProgress>,
     pause_state: Option<Arc<TokioMutex<bool>>>,
     on_finish_callback: Option<OnFinishCallback>,
-    last_progress_update_time: Instant, // Track update frequency internally
+    last_progress_log_time: Instant, // Track last log time
 }
 
 impl PlaybackStateManager {
@@ -27,7 +27,7 @@ impl PlaybackStateManager {
             progress_info: None,
             pause_state: None,
             on_finish_callback: None,
-            last_progress_update_time: Instant::now(),
+            last_progress_log_time: Instant::now(),
         }
     }
 
@@ -52,26 +52,24 @@ impl PlaybackStateManager {
     /// Updates the shared progress information based on the current timestamp.
     /// Returns true if the progress was updated, false otherwise (e.g., due to rate limiting).
     #[instrument(skip(self), fields(current_ts))]
-    pub async fn update_progress(
-        &mut self,
-        current_ts: u64,
-        track_time_base: Option<TimeBase>,
-    ) -> bool {
-        // Update progress roughly every second
-        if self.last_progress_update_time.elapsed() < std::time::Duration::from_secs(1) {
-            return false;
-        }
+    pub async fn update_progress(&mut self, current_ts: u64, track_time_base: Option<TimeBase>) {
+        // Note: This function no longer returns bool as it always updates progress now.
+        // The rate limiting is only for logging.
+        // Removed rate limiting - update progress on every call
 
         if let (Some(progress_arc), Some(time_base)) = (&self.progress_info, track_time_base) {
             let current_seconds = time_base.calc_time(current_ts).seconds as f64
                 + time_base.calc_time(current_ts).frac;
 
-            trace!(target: LOG_TARGET, "Updating progress: TS={}, Seconds={:.2}", current_ts, current_seconds);
+            // Log progress update roughly every second
+            let should_log = self.last_progress_log_time.elapsed() >= std::time::Duration::from_secs(1);
+            if should_log {
+                trace!(target: LOG_TARGET, "Updating progress (throttled log): TS={}, Seconds={:.2}", current_ts, current_seconds);
+                self.last_progress_log_time = Instant::now();
+            }
 
             let mut progress_guard = progress_arc.lock().await;
             progress_guard.current_seconds = current_seconds;
-            self.last_progress_update_time = Instant::now();
-            true
         } else {
             if self.progress_info.is_none() {
                 trace!(target: LOG_TARGET, "Skipping progress update: progress_info not set.");
@@ -79,7 +77,7 @@ impl PlaybackStateManager {
             if track_time_base.is_none() {
                 trace!(target: LOG_TARGET, "Skipping progress update: track_time_base not set.");
             }
-            false
+            // No return value needed now
         }
     }
 

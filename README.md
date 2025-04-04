@@ -24,6 +24,7 @@ This project is in **early development**. Current implementation:
 - **Network Discovery**: Uses SSDP broadcasting to announce its presence on the network.
 - **Remote Control**: Stable session management and WebSocket support enables remote control capabilities via other Jellyfin clients.
 
+- **Playback Reporting**: Reports playback status (start, stop, progress, pause, volume) to the connected Jellyfin server, visible in the Jellyfin dashboard.
 ## Requirements
 
 - Rust toolchain (2021 edition or later)
@@ -155,6 +156,8 @@ The application stores configuration in `~/.config/jellycli/config.json` which c
 
 You can specify a custom configuration path with the `--config` option.
 
+
+*Note: Playback reporting to the Jellyfin server is enabled by default and does not require specific configuration settings.*
 
 ## Logging
 

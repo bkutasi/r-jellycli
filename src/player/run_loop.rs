@@ -1,14 +1,18 @@
 use crate::audio::playback::AudioPlaybackControl;
+// Imports removed as functions using them were moved to mod.rs
 use super::{Player, InternalPlayerStateUpdate, PlayerCommand, PLAYER_LOG_TARGET, command_handler};
-use std::time::Duration as StdDuration;
-use tokio::time::interval;
+// Removed unused StdDuration import
+// use tokio::time::interval; // Import removed as function using it was moved
 use tracing::{error, info, trace, warn};
 
 /// Runs the player's command processing loop.
 pub async fn run_player_loop(player: &mut Player) {
     info!(target: PLAYER_LOG_TARGET, "Player run loop started.");
 
-    let mut progress_report_interval = interval(StdDuration::from_secs(5));
+
+
+    // Remove the old progress report interval, the reporting task handles this now.
+    // let mut progress_report_interval = interval(StdDuration::from_secs(5));
 
     loop {
         tokio::select! {
@@ -28,6 +32,9 @@ pub async fn run_player_loop(player: &mut Player) {
                         let _ = responder.send(state);
                     }
                     PlayerCommand::TrackFinished => command_handler::handle_track_finished(player).await,
+                    // Correctly placed SetVolume and ToggleMute arms
+                    PlayerCommand::SetVolume(volume) => command_handler::handle_set_volume(player, volume).await,
+                    PlayerCommand::ToggleMute => command_handler::handle_toggle_mute(player).await,
                     PlayerCommand::Shutdown => {
                         info!(target: PLAYER_LOG_TARGET, "Shutdown command received. Exiting run loop.");
                         let stopped_item_id = player.current_item_id.clone();
@@ -37,15 +44,17 @@ pub async fn run_player_loop(player: &mut Player) {
 
                         if stopped_item_id.is_some() {
                              let _final_position = player.get_current_position().await;
-                             let snapshot = player.get_playback_state_snapshot().await;
-                             player.reporter.report_playback_stop(&snapshot, false).await;
+                             // Stop the reporting task before exiting
+                             super::stop_and_clear_reporting_task(player).await;
+                             // let snapshot = player.get_playback_state_snapshot().await;
+                             // player.reporter.report_playback_stop(&snapshot, false).await; // Handled by reporting task
                         }
 
                         player.broadcast_update(InternalPlayerStateUpdate::Stopped);
                         break;
                     }
                 }
-            }
+            } // Removed duplicate match arms here
 
              join_result = async { player.audio_task_manager.as_mut().unwrap().handle().await }, if player.audio_task_manager.is_some() => {
                  // Task handle completed, take ownership of the manager
@@ -102,8 +111,10 @@ pub async fn run_player_loop(player: &mut Player) {
                      player.is_playing = false;
                      *player.is_paused.lock().await = false; // Ensure pause state is reset
                      player.current_item_id = None;
-                     let snapshot = player.get_playback_state_snapshot().await;
-                     player.reporter.report_playback_stop(&snapshot, false).await;
+                     // Stop the reporting task due to unexpected audio stop
+                     super::stop_and_clear_reporting_task(player).await;
+                     // let snapshot = player.get_playback_state_snapshot().await;
+                     // player.reporter.report_playback_stop(&snapshot, false).await; // Handled by reporting task
                      player.broadcast_update(InternalPlayerStateUpdate::Stopped);
                  } else if unexpected_stop {
                      // Log if it stopped unexpectedly but the player was already stopped/paused
@@ -114,18 +125,9 @@ pub async fn run_player_loop(player: &mut Player) {
                  }
              }
 
-             _ = progress_report_interval.tick(), if player.is_playing && !*player.is_paused.lock().await => {
-                trace!(target: PLAYER_LOG_TARGET, "Progress report interval ticked.");
-                let snapshot = player.get_playback_state_snapshot().await;
-                player.reporter.report_playback_progress(&snapshot).await;
-
-                if let Some(id) = player.current_item_id.clone() {
-                     player.broadcast_update(InternalPlayerStateUpdate::Progress {
-                         item_id: id,
-                         position_ticks: player.get_current_position().await,
-                     });
-                }
-            }
+            // Remove the old interval-based progress reporting block.
+            // The dedicated reporting task now handles periodic progress reports internally.
+            // _ = progress_report_interval.tick(), if player.is_playing && !*player.is_paused.lock().await => { ... }
 
             else => {
                 info!(target: PLAYER_LOG_TARGET, "Command channel closed or select! error. Exiting run loop.");
@@ -137,7 +139,8 @@ pub async fn run_player_loop(player: &mut Player) {
     info!(target: PLAYER_LOG_TARGET, "Player run loop finished. Performing final cleanup.");
     if let Some(manager) = player.audio_task_manager.take() {
          info!(target: PLAYER_LOG_TARGET, "Stopping active audio task manager during final cleanup.");
-         manager.stop_task().await;
+         manager.stop_task().await; // Stop audio task
+         super::stop_and_clear_reporting_task(player).await; // Stop reporting task
     }
     info!(target: PLAYER_LOG_TARGET, "Shutting down shared audio backend...");
     match player.audio_backend.lock().await.shutdown().await {

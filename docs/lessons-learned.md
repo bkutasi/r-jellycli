@@ -133,6 +133,15 @@
     *   **Lesson**: Breaking down a complex task (like audio playback) into smaller, cooperating asynchronous tasks requires careful design of communication channels (e.g., for data flow, state updates, shutdown signals) and error propagation. Each task must handle its specific errors and signal failure appropriately to its coordinator (e.g., `loop_runner` or `audio_task_manager`). Furthermore, ensuring that resources (like ALSA handles or shared state via `state_manager`) are consistently managed and released across these tasks, even in error scenarios, is critical to prevent deadlocks or unexpected terminations.
     *   **Pattern**: Use clear ownership or shared ownership (`Arc`) for resources. Employ channels (like `tokio::sync::mpsc` or `watch`) for state and data flow. Propagate errors upwards using `Result` types. Ensure coordinator tasks `await` child tasks during shutdown or error recovery.
 
+4.  **Dedicated Task for State Reporting (Playback Progress)**:
+    *   **Problem**: Integrating frequent, time-sensitive state reporting (like playback progress) directly into the main player loop or audio loop can complicate their logic and potentially introduce delays or inaccuracies.
+    *   **Solution**: Implemented a dedicated asynchronous task (`run_reporting_task`) solely responsible for reporting playback state (Start, Progress, Stop) to the Jellyfin server via HTTP POST.
+    *   **Communication Pattern**: This task uses a hybrid approach:
+        *   Receives overall state snapshots and commands (like pause/volume changes, stop requests) from the main `Player` loop via an `mpsc` channel (`ReportingCommand`).
+        *   Reads the *live* playback position (`current_seconds`) directly from shared state (`SharedProgress` - `Arc<TokioMutex<PlaybackProgressInfo>>`) which is updated by the audio loop (`state_manager.rs`).
+    *   **Lesson**: This pattern effectively decouples the reporting logic. The dedicated task handles the timing (using `tokio::time::interval`) and complexities of reporting, while the main player loop only needs to send high-level state changes. Direct access to shared state for frequently changing data (like progress) ensures accuracy without flooding the command channel. Explicit lifecycle management (starting/stopping the task with playback) is crucial.
+    *   **Benefit**: Improved modularity, clearer separation of concerns, more accurate and timely state reporting.
+
 1. **Thread Safety Issues**
    - **Problem**: Box<dyn StdError> was not Send + Sync safe.
    - **Solution**: Properly wrapped errors in std::io::Error with string messages instead of passing raw dynamic error types.

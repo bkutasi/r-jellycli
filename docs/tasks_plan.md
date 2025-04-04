@@ -6,7 +6,7 @@
 
 **Project Phase**: Core Functionality Implementation
 
-**Last Updated**: April 4, 2025 (Audio Refactoring Documentation)
+**Last Updated**: April 4, 2025 (Playback Reporting Refactor Documentation)
 
 ## Priority Tasks
 
@@ -98,19 +98,20 @@
    - Status: Completed
 
 11. **Audio Playback Debugging & Fixes**
-   - Switched playback reporting from WebSocket to HTTP POST (resolving server errors).
+   - Resolved various playback issues including sample rate mismatches and ALSA underruns.
    - Implemented audio resampling using `rubato` to handle sample rate mismatches.
    - Corrected ALSA underrun (EPIPE) handling to retry writes instead of skipping data.
    - Refactored shutdown logic into `async fn shutdown` to prevent panics in `Drop`.
    - Confirmed playback pipeline (decode, resample, write) is functional.
     - Resolved application hang on shutdown (Ctrl+C) previously caused by ALSA device closing issues, as an indirect result of pause/resume logic fixes.
    - Status: Completed
-9. **Jellyfin Remote Control State Reporting**
-   - Implemented mechanism for `Player` to report state (Start, Stop, Progress) via channel to `WebSocketHandler`.
-   - `WebSocketHandler` now sends `PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress` messages to Jellyfin server.
-   - Added shared state for `AlsaPlayer` to report playback time.
-   - Refactored `Player` to manage background tasks for playback and reporting.
-   - Status: Completed (Requires testing for UI visibility/control)
+9. **Playback State Reporting Refactoring & Implementation**
+   - Switched reporting from WebSocket to HTTP POST.
+   - Implemented a dedicated asynchronous task (`run_reporting_task`) for handling all playback reporting (Start, Progress, Stop) via HTTP POST requests using `jellyfin::reporter`.
+   - Established communication between the main `Player` loop and the reporting task using an `mpsc` channel (`ReportingCommand`).
+   - Implemented shared state (`SharedProgress` via `Arc<TokioMutex<...>>`) for the reporting task to access live playback position updates from the audio loop.
+   - Debugged and ensured accurate reporting timing and state synchronization.
+   - Status: Completed
 
 10. **Core Component Refactoring**
    - Refactored `jellyfin::websocket`, `jellyfin::api`, and `audio::playback` modules.

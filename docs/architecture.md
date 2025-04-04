@@ -68,29 +68,33 @@ graph TD
   - **Note**: Playback state reporting (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) is now handled via direct HTTP POST requests to the server, not WebSocket messages.
 
 #### 3. Player Orchestrator & Playback Engine (`player` and `audio` modules)
-- **Responsibility**: Manages the overall playback lifecycle (`player` module), coordinates audio decoding, processing, and output (`audio` module), and reports state back to the Jellyfin server.
+- **Responsibility**: Manages the overall playback lifecycle (`player` module), coordinates audio decoding, processing, and output (`audio` module), and reports playback state back to the Jellyfin server.
 - **Implementation**:
-    - **`Player` (`src/player/mod.rs` & submodules)**: Central orchestrator. Spawns and manages background tasks for audio playback (`audio_task_manager.rs`), item fetching (`item_fetcher.rs`), command handling (`command_handler.rs`), and progress reporting (`reporter.rs` in `jellyfin` module). Communicates state changes directly to the Jellyfin server via HTTP POST requests. Uses broadcast channels for task shutdown.
+    - **`Player` (`src/player/mod.rs` & submodules)**: Central orchestrator. Spawns and manages background tasks for audio playback (`audio_task_manager.rs`), item fetching (`item_fetcher.rs`), and command handling (`command_handler.rs`). Crucially, it also spawns and manages a dedicated asynchronous task (`run_reporting_task` defined in `src/player/mod.rs`) specifically for handling playback state reporting to the Jellyfin server. Communication with this reporting task occurs via an `mpsc` channel using the `ReportingCommand` enum.
     - **Audio Subsystem (`src/audio/mod.rs` & submodules)**: Handles the specifics of audio playback. Refactored from a monolithic `playback.rs` into:
         - `playback.rs`: Simplified entry point or coordinator for the audio subsystem.
         - `loop_runner.rs`: Manages the main audio processing loop task.
         - `processor.rs`: Contains the core logic for fetching decoded data, processing it (e.g., format conversion), and sending it to the writer.
         - `alsa_writer.rs`: Handles writing processed audio samples to the ALSA device via `alsa_handler.rs`.
-        - `state_manager.rs`: Manages shared playback state (e.g., playing/paused, progress).
-        - `decoder.rs`: Handles stream decoding using Symphonia.
+        - `state_manager.rs`: Manages shared playback state, including configuring the shared progress tracker (`SharedProgress`) and pause state (`Arc<TokioMutex<bool>>`). Updates the `SharedProgress` based on decoder timestamps.
+        - `decoder.rs`: Handles stream decoding using Symphonia, providing timestamps to the `state_manager`.
         - `alsa_handler.rs`: Low-level interaction with the ALSA PCM device.
         - `format_converter.rs`: Converts audio samples if needed.
         - `sample_converter.rs`: Utility for sample format conversions.
-        - `progress.rs`: Manages playback progress tracking (`PlaybackProgressInfo`), likely used by `state_manager.rs`.
+        - `progress.rs`: Defines the shared progress structure (`PlaybackProgressInfo`) and its thread-safe wrapper (`SharedProgress = Arc<TokioMutex<PlaybackProgressInfo>>`). This shared state is updated by `state_manager.rs` and read directly by the reporting task.
         - `error.rs`: Defines audio-specific errors (`AudioError`).
 - **Key Features**:
-  - Asynchronous task management for playback and progress reporting.
-  - Decoupled state communication using channels and shared memory (e.g., via `state_manager.rs`).
+  - Asynchronous task management for playback and a *dedicated* task for progress reporting.
+  - Decoupled state communication:
+    - `Player` -> Reporting Task: `mpsc` channel (`ReportingCommand`).
+    - Audio Loop -> Reporting Task: Shared state (`SharedProgress` via `Arc<TokioMutex<...>>`) for live progress updates.
+    - `Player` -> UI/Other: Broadcast channel (`InternalPlayerStateUpdate`).
   - ALSA device setup and configuration.
   - Audio stream decoding and processing.
   - Playback lifecycle management (Start, Stop, Pause, Seek - check `player` module for current status).
-  - Periodic progress reporting to Jellyfin server via HTTP POST requests.
-
+  - Playback state reporting to Jellyfin server via HTTP POST requests, managed by the dedicated reporting task. This includes:
+    - Periodic progress updates during playback (driven by a timer within the reporting task).
+    - Immediate updates upon significant state changes (e.g., playback start, stop, pause, volume change), triggered by `ReportingCommand`s.
 #### 4. Configuration Management (`config` module)
 - **Responsibility**: Managing user settings and application configuration
 - **Implementation**: `src/config/mod.rs`, `src/config/settings.rs`
@@ -126,10 +130,11 @@ graph TD
 10. **Playback Initiation** → (Local or Remote) Command received (CLI or WebSocket) to play media.
 11. **Streaming URL** → Application gets playback info and streaming URL (HTTP).
 12. **Playback & State Reporting** →
-    *   `Player` starts the `AlsaPlayer` task, which orchestrates decoding (`decoder.rs`), ALSA interaction (`alsa_handler.rs`), and streaming (`stream_wrapper.rs`, HTTP) for playback.
-    *   `Player` starts a progress reporting task that reads time from the shared state managed by `progress.rs`.
-    *   `Player`'s background task reads time from the shared state managed by `progress.rs`.
-    *   `Player` sends `PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress` updates directly to the Jellyfin server via HTTP POST requests to `/Sessions/Playing`, `/Sessions/Playing/Stopped`, and `/Sessions/Playing/Progress` respectively.
+    *   `Player` starts the audio playback task (`audio_task_manager.rs`), which orchestrates decoding (`decoder.rs`), ALSA interaction (`alsa_handler.rs`), streaming (`stream_wrapper.rs`, HTTP), and updating the shared progress state (`SharedProgress` via `state_manager.rs`).
+    *   `Player` starts a dedicated reporting task (`run_reporting_task` in `player/mod.rs`) using `jellyfin::reporter`.
+    *   The reporting task receives initial state and subsequent updates (`ReportingCommand::StateUpdate`) from the `Player` via an `mpsc` channel.
+    *   The reporting task reads the *live* playback position from the `SharedProgress` (`Arc<TokioMutex<PlaybackProgressInfo>>`) updated by the audio loop.
+    *   Based on commands received and its internal timer, the reporting task sends updates directly to the Jellyfin server via HTTP POST requests (`/Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`).
 13. **Configuration Update** → Any new settings are saved back to config file on exit.
 
 ## Key Interfaces
@@ -174,15 +179,15 @@ graph TD
     - Runs independently, requires configuration (`DeviceId`).
     - Interacts with the network via UDP.
 
-5.  **Playback Reporting Mechanism (HTTP POST)**
-    - **Purpose**: Communication channel from `Player` to the Jellyfin Server for state updates.
-    - **Mechanism**: The `Player` component (specifically its progress reporting task) directly sends HTTP POST requests to the Jellyfin server endpoints (`/Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`) to report playback status. This replaces the previous WebSocket-based reporting.
-
-6.  **`PlaybackProgressInfo` Shared State (`Arc<StdMutex<...>>`)**
-    - **Purpose**: Communication channel from the audio playback logic (`src/audio/progress.rs`) to `Player`'s progress reporting task.
-    - **Data**: Contains current playback position (e.g., seconds).
-    - **Mechanism**: The audio playback logic updates the state during playback; `Player`'s background task reads it periodically to send `Progress` updates via the MPSC channel.
-
+5.  **Player <-> Reporting Task Communication (`ReportingCommand` Channel)**
+    - **Purpose**: Control channel from the main `Player` loop to the dedicated reporting task (`run_reporting_task`).
+    - **Mechanism**: An `mpsc` channel transmitting `ReportingCommand` enum variants (`StateUpdate`, `ReportProgressNow`, `StopAndReport`). Allows the `Player` to inform the reporting task about significant state changes (like pause/unpause, volume changes, track changes) or to explicitly trigger reports or shutdown.
+6.  **Audio Loop -> Reporting Task Communication (`SharedProgress`)**
+    - **Purpose**: Provides the reporting task with near real-time playback position updates.
+    - **Mechanism**: An `Arc<TokioMutex<PlaybackProgressInfo>>` (defined as `SharedProgress` in `src/audio/progress.rs`). The audio decoding loop (via `src/audio/state_manager.rs`) locks and updates the `current_seconds` field within the `PlaybackProgressInfo` struct. The reporting task locks and reads this value directly when constructing progress reports, ensuring the reported position is accurate.
+7.  **Reporting Task -> Jellyfin Server Communication (HTTP POST)**
+    - **Purpose**: Sends playback status updates to the Jellyfin server.
+    - **Mechanism**: The dedicated reporting task (`run_reporting_task`) uses functions from `src/jellyfin/reporter.rs` (which internally use the `JellyfinApiContract`) to send HTTP POST requests to the relevant Jellyfin API endpoints (`/Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`).
 ## Security Considerations
 
 - API keys and tokens are stored in configuration file (permissions should be restricted).

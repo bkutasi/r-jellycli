@@ -1,5 +1,6 @@
-use super::{Player, InternalPlayerStateUpdate, PLAYER_LOG_TARGET, item_fetcher, playback_starter};
-use tracing::{info, warn, instrument};
+use super::{Player, InternalPlayerStateUpdate, PLAYER_LOG_TARGET, item_fetcher, playback_starter, ReportingCommand}; // Import ReportingCommand
+// VolumeChanged and MuteStatusChanged are variants of InternalPlayerStateUpdate
+use tracing::{info, warn, instrument, debug, trace}; // Add trace
 use crate::audio::PlaybackProgressInfo;
 
 
@@ -74,7 +75,7 @@ pub async fn handle_add_to_queue(player: &mut Player, item_ids: Vec<String>) {
 #[instrument(skip(player))]
 pub async fn handle_clear_queue(player: &mut Player) {
     info!(target: PLAYER_LOG_TARGET, "Handling ClearQueue command.");
-    let stopped_item_id = player.current_item_id.clone();
+    let _stopped_item_id = player.current_item_id.clone(); // Prefix unused variable
     let _final_position = player.get_current_position().await;
     if let Some(manager) = player.audio_task_manager.take() {
         info!(target: PLAYER_LOG_TARGET, "Stopping audio task manager in handle_clear_queue.");
@@ -84,10 +85,11 @@ pub async fn handle_clear_queue(player: &mut Player) {
     player.is_playing = false;
     *player.is_paused.lock().await = false;
     player.current_item_id = None;
-    if stopped_item_id.is_some() {
-         let snapshot = player.get_playback_state_snapshot().await; // Needs get_playback_state_snapshot
-         player.reporter.report_playback_stop(&snapshot, false).await;
-    }
+    // Stop reporting task is handled by run_loop when audio_task_manager finishes or is stopped.
+    // if stopped_item_id.is_some() {
+    //      let snapshot = player.get_playback_state_snapshot().await;
+    //      // player.reporter.report_playback_stop(&snapshot, false).await; // Removed
+    // }
     player.broadcast_update(InternalPlayerStateUpdate::Stopped);
 
     player.queue.clear();
@@ -131,8 +133,9 @@ pub async fn handle_pause(player: &mut Player) {
              queue_ids: player.queue.iter().map(|i| i.id.clone()).collect(),
              queue_index: player.current_queue_index,
          });
-         let snapshot = player.get_playback_state_snapshot().await;
-         player.reporter.report_playback_progress(&snapshot).await;
+         // Send state update to the reporting task
+         let snapshot = player.get_full_state().await;
+         send_reporting_command(player, ReportingCommand::StateUpdate(snapshot)).await;
     }
 }
 
@@ -150,8 +153,9 @@ pub async fn handle_resume(player: &mut Player) {
              queue_ids: player.queue.iter().map(|i| i.id.clone()).collect(),
              queue_index: player.current_queue_index,
          });
-         let snapshot = player.get_playback_state_snapshot().await;
-         player.reporter.report_playback_progress(&snapshot).await;
+         // Send state update to the reporting task
+         let snapshot = player.get_full_state().await;
+         send_reporting_command(player, ReportingCommand::StateUpdate(snapshot)).await;
     }
 }
 
@@ -192,8 +196,9 @@ pub async fn handle_track_finished(player: &mut Player) {
     info!(target: PLAYER_LOG_TARGET, "Handling TrackFinished internal command.");
     let _final_position = player.get_current_position().await;
 
-    let snapshot = player.get_playback_state_snapshot().await;
-    player.reporter.report_playback_stop(&snapshot, true).await;
+    // Stop reporting task is handled by run_loop when audio_task_manager finishes.
+    // let snapshot = player.get_playback_state_snapshot().await;
+    // player.reporter.report_playback_stop(&snapshot, true).await; // Removed
 
 
     player.is_playing = false;
@@ -210,5 +215,69 @@ pub async fn handle_track_finished(player: &mut Player) {
         info!(target: PLAYER_LOG_TARGET, "Track finished, end of queue reached.");
         player.broadcast_update(InternalPlayerStateUpdate::Stopped);
         player.is_handling_track_finish = false; // Release lock at end of queue
+    }
+}
+
+
+#[instrument(skip(player), fields(new_volume = volume))]
+pub async fn handle_set_volume(player: &mut Player, volume: u32) {
+    let clamped_volume = volume.min(100); // Clamp volume to 0-100
+    info!(target: PLAYER_LOG_TARGET, "Handling SetVolume command: {}", clamped_volume);
+    player.volume_level = clamped_volume; // Assumes Player struct has volume_level: u32
+
+    // Also unmute if volume is set > 0
+    if clamped_volume > 0 && player.is_muted {
+        player.is_muted = false;
+        player.broadcast_update(InternalPlayerStateUpdate::MuteStatusChanged { is_muted: false }); // Use full path
+        debug!(target: PLAYER_LOG_TARGET, "Unmuted due to volume change.");
+        // Send state update after potential mute change
+        let snapshot = player.get_full_state().await;
+        send_reporting_command(player, ReportingCommand::StateUpdate(snapshot.clone())).await; // Clone snapshot if needed below
+    }
+
+    player.broadcast_update(InternalPlayerStateUpdate::VolumeChanged { volume_level: clamped_volume }); // Use full path
+    // Send state update after volume change
+    // If mute status wasn't changed above, we still need to send the update
+    if !(clamped_volume > 0 && player.is_muted) { // Check if mute status was already handled
+       let snapshot = player.get_full_state().await;
+       send_reporting_command(player, ReportingCommand::StateUpdate(snapshot)).await;
+    }
+
+    // Apply volume to the audio backend if it's running
+    // TODO: Implement set_volume on AudioTaskManager and uncomment this block
+    // if let Some(manager) = &player.audio_task_manager {
+    //     if let Err(e) = manager.set_volume(clamped_volume as f32 / 100.0).await {
+    //          warn!(target: PLAYER_LOG_TARGET, "Failed to apply volume to audio backend: {}", e);
+    //     }
+    // }
+}
+
+#[instrument(skip(player))]
+pub async fn handle_toggle_mute(player: &mut Player) {
+    player.is_muted = !player.is_muted; // Assumes Player struct has is_muted: bool
+    info!(target: PLAYER_LOG_TARGET, "Handling ToggleMute command. New state: {}", player.is_muted);
+    player.broadcast_update(InternalPlayerStateUpdate::MuteStatusChanged { is_muted: player.is_muted });
+    // Send state update after mute toggle
+    let snapshot = player.get_full_state().await;
+    send_reporting_command(player, ReportingCommand::StateUpdate(snapshot)).await;
+
+    // Apply mute state to the audio backend if it's running
+    if let Some(manager) = &player.audio_task_manager {
+         if let Err(e) = manager.set_mute(player.is_muted).await {
+             warn!(target: PLAYER_LOG_TARGET, "Failed to apply mute state to audio backend: {}", e); // Corrected format string
+         }
+    }
+}
+
+/// Helper to send a command to the reporting task if it's active.
+async fn send_reporting_command(player: &Player, command: ReportingCommand) {
+     if let Some(sender) = &player.reporting_command_tx {
+        trace!(target: PLAYER_LOG_TARGET, "Sending command to reporting task: {:?}", command);
+        if let Err(e) = sender.send(command).await {
+            warn!(target: PLAYER_LOG_TARGET, "Failed to send command to reporting task (channel closed?): {}", e);
+            // Consider if the sender/handle should be cleared here if sending fails repeatedly.
+        }
+    } else {
+         trace!(target: PLAYER_LOG_TARGET, "Cannot send command, no active reporting task sender: {:?}", command);
     }
 }

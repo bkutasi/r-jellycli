@@ -82,7 +82,16 @@ impl AudioTaskManager {
     pub fn item_id(&self) -> &str {
         &self.item_id
     }
+
+    /// Sets the mute state (placeholder).
+    /// TODO: Implement actual mute logic, likely involving communication with the audio task.
+    pub async fn set_mute(&self, is_muted: bool) -> Result<(), crate::audio::error::AudioError> {
+        warn!(target: PLAYER_LOG_TARGET, item_id = %self.item_id, "set_mute called (is_muted: {}), but not implemented yet.", is_muted);
+        // TODO: Implement actual mute logic
+        Ok(())
+    }
 }
+
 
 /// Spawns a new Tokio task to handle audio playback.
 #[instrument(skip(shared_backend, on_finish_callback, internal_cmd_tx), fields(item_id = %item_id_clone, stream_url = %stream_url_clone))]
