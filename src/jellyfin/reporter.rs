@@ -1,11 +1,9 @@
-// src/jellyfin/reporter.rs
 
 use std::sync::Arc;
 use tracing::{error, info, trace, warn, instrument};
 use crate::jellyfin::api::{JellyfinApiContract, JellyfinError};
 use crate::jellyfin::models::MediaItem;
 
-// Re-export necessary types from models_playback or define locally if needed
 pub use crate::jellyfin::models_playback::{
     PlaybackReportBase, QueueItem, PlaybackStartReport, PlaybackStopReport,
     PlaybackStoppedInfoInner, PlaybackProgressReport,
@@ -17,12 +15,11 @@ const REPORTER_LOG_TARGET: &str = "r_jellycli::jellyfin::reporter";
 /// This snapshot avoids needing direct access to the Player's internal mutable state.
 #[derive(Debug, Clone)]
 pub struct PlaybackStateSnapshot {
-    pub queue: Vec<MediaItem>, // Clone of the queue items
+    pub queue: Vec<MediaItem>,
     pub current_queue_index: usize,
     pub current_item_id: Option<String>,
     pub position_ticks: i64,
     pub is_paused: bool,
-    // Add other relevant fields like volume, mute if they are reintroduced
 }
 
 /// Handles reporting playback status updates to the Jellyfin server.
@@ -37,7 +34,7 @@ impl JellyfinReporter {
 
     /// Constructs the base report structure from the current player state snapshot.
     fn build_report_base(&self, state: &PlaybackStateSnapshot) -> Option<PlaybackReportBase> {
-        let item_id = state.current_item_id.clone()?; // Need an item ID to report
+        let item_id = state.current_item_id.clone()?;
 
         // Find the item in the *snapshot* queue to get its duration
         let item_duration = state.queue.iter()
@@ -47,26 +44,26 @@ impl JellyfinReporter {
 
         let queue_items: Vec<QueueItem> = state.queue.iter().enumerate().map(|(idx, i)| QueueItem {
             id: i.id.clone(),
-            playlist_item_id: format!("playlistItem{}", idx), // Simple playlist item ID generation
+            playlist_item_id: format!("playlistItem{}", idx),
         }).collect();
 
         let session_id = self.jellyfin_client.play_session_id().to_string();
 
         Some(PlaybackReportBase {
             queueable_media_types: vec!["Audio".to_string()],
-            can_seek: false, // Assuming seeking is not supported for now
+            can_seek: false,
             item_id: item_id.clone(),
-            media_source_id: item_id.clone(), // Assuming item ID is the media source ID
+            media_source_id: item_id.clone(),
             position_ticks: state.position_ticks,
-            volume_level: 0, // TODO: Get actual volume if implemented
+            volume_level: 0,
             is_paused: state.is_paused,
-            is_muted: false, // TODO: Get actual mute state if implemented
-            play_method: "DirectPlay".to_string(), // Assuming DirectPlay
+            is_muted: false,
+            play_method: "DirectPlay".to_string(),
             play_session_id: session_id,
-            live_stream_id: None, // Assuming not a live stream
+            live_stream_id: None,
             playlist_length: item_duration,
             playlist_index: Some(state.current_queue_index as i32),
-            shuffle_mode: "Sorted".to_string(), // TODO: Add shuffle state
+            shuffle_mode: "Sorted".to_string(),
             now_playing_queue: queue_items,
         })
     }
@@ -76,7 +73,6 @@ impl JellyfinReporter {
     pub async fn report_playback_start(&self, state: &PlaybackStateSnapshot) {
         let base = match self.build_report_base(state) {
             Some(mut base) => {
-                // Ensure start report reflects initial state correctly
                 base.position_ticks = 0;
                 base.is_paused = false;
                 base
@@ -101,7 +97,7 @@ impl JellyfinReporter {
          let base = match self.build_report_base(state) {
             Some(mut base) => {
                 // Ensure stop report reflects final state correctly
-                base.is_paused = false; // Stopped is not paused
+                base.is_paused = false;
                 base
             },
             None => {
@@ -131,7 +127,7 @@ impl JellyfinReporter {
             Some(base) => base,
             None => {
                 trace!(target: REPORTER_LOG_TARGET, "Skipping progress report: Missing current item ID in state snapshot.");
-                return; // Cannot report progress without an item
+                return;
             }
         };
 
@@ -144,7 +140,6 @@ impl JellyfinReporter {
             }
             Err(e) => {
                 error!(target: REPORTER_LOG_TARGET, "Failed to report playback progress: {}", e);
-                // Consider stopping reporting or handling differently?
             }
         }
     }

@@ -16,10 +16,6 @@ pub async fn authenticate(
     let server_url = server_url.trim_end_matches('/');
     let auth_url = format!("{}/Users/authenticatebyname", server_url);
     
-    println!("[DEBUG] Server URL: {}", server_url);
-    println!("[DEBUG] Auth URL: {}", auth_url);
-    println!("[DEBUG] Username: {}", username);
-    println!("[DEBUG] Password length: {}", password.len());
     
     // Prepare auth request payload
     let auth_request = AuthRequest {
@@ -40,10 +36,6 @@ pub async fn authenticate(
         )
     );
     
-    println!("[DEBUG] Sending auth request with headers:");
-    for (key, value) in headers.iter() {
-        println!("  {}: {}", key, value.to_str().unwrap_or("<binary>"));
-    }
     
     // Send authentication request
     let response = client
@@ -53,30 +45,19 @@ pub async fn authenticate(
         .send()
         .await?;
         
-    println!("[DEBUG] Response status: {}", response.status());
     
     // Handle different response statuses
     match response.status() {
         reqwest::StatusCode::OK => {
             // Get the raw response text first for debugging
             let response_text = response.text().await?;
-            println!("[DEBUG] Raw auth response length: {} bytes", response_text.len());
-            if !response_text.is_empty() {
-                println!("[DEBUG] First 100 chars: {}", &response_text[..std::cmp::min(100, response_text.len())]);
-            } else {
-                println!("[DEBUG] Response is empty!");
-            }
             
             // Parse the response manually
             match serde_json::from_str::<AuthResponse>(&response_text) {
                 Ok(auth_response) => {
-                    println!("[DEBUG] Successfully parsed auth response");
-                    println!("[DEBUG] Access token: {}", auth_response.access_token);
-                    println!("[DEBUG] User ID: {}", auth_response.user.id);
                     Ok(auth_response)
                 },
                 Err(e) => {
-                    println!("[DEBUG] JSON parsing error: {}", e);
                     Err(format!("Failed to parse auth response: {}", e).into())
                 }
             }

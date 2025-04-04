@@ -27,11 +27,9 @@ struct AuthenticationTester {
 impl AuthenticationTester {
     /// Create a new authentication tester with detailed diagnostics
     fn new(credentials_path: &Path) -> Result<Self, Box<dyn Error>> {
-        // Load credentials
         println!("Loading credentials from {}...", credentials_path.display());
         let credentials = test_utils::load_credentials(credentials_path)?;
         
-        // Create HTTP client with advanced options
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
@@ -49,13 +47,10 @@ impl AuthenticationTester {
     
     /// Get properly formatted server URL
     fn get_server_url(&self) -> String {
-        // Determine if we should try with HTTPS (can be set via environment variable)
         let use_https = env::var("USE_HTTPS").unwrap_or_else(|_| "false".to_string()) == "true";
         
-        // Try with original URL first
         let server_url = self.credentials.server_url.trim_end_matches('/');
         
-        // If server URL doesn't start with http:// or https://, prepend http:// or https://
         if !server_url.starts_with("http://") && !server_url.starts_with("https://") {
             if use_https {
                 format!("https://{}", server_url)
@@ -69,14 +64,12 @@ impl AuthenticationTester {
     
     /// Create authentication headers
     fn create_auth_headers(&self) -> Result<header::HeaderMap, Box<dyn Error>> {
-        // Create base headers
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE, 
             header::HeaderValue::from_static("application/json")
         );
         
-        // Create the main authorization header
         let auth_header = format!(
             "MediaBrowser Client=\"{}\", Device=\"CLI\", DeviceId=\"{}\", Version=\"{}\"",
             self.client_name, self.device_id, self.client_version
@@ -84,13 +77,11 @@ impl AuthenticationTester {
         
         println!("Authorization header: {}", auth_header);
         
-        // Try with X-Emby-Authorization as recommended in the guide
         headers.insert(
             "X-Emby-Authorization", 
             header::HeaderValue::from_str(&auth_header)?
         );
         
-        // Add User-Agent for good measure
         headers.insert(
             header::USER_AGENT, 
             header::HeaderValue::from_str(&format!("{}/{}", self.client_name, self.client_version))?
@@ -111,13 +102,11 @@ impl AuthenticationTester {
         
         println!("\n📋 Authentication Request Details:");
         
-        // Create authentication body
         let auth_body = serde_json::json!({
             "Username": self.credentials.username,
             "Pw": self.credentials.password
         });
         
-        // Create headers
         let headers = self.create_auth_headers()?;
         
         println!("\n🔄 Sending authentication request...");
@@ -125,10 +114,8 @@ impl AuthenticationTester {
         println!("Method: POST");
         println!("Headers: {:#?}", headers);
         
-        // Log the complete request with password redacted
         println!("Request body: {}", serde_json::to_string_pretty(&auth_body)?.replace(&self.credentials.password, "[REDACTED]"));
         
-        // Make the actual request
         let response = self.client
             .post(&auth_url)
             .headers(headers.clone())
@@ -140,7 +127,6 @@ impl AuthenticationTester {
         println!("Status: {}", response.status());
         println!("Response headers: {:#?}", response.headers());
         
-        // Process the response
         self.process_response(response, server_url).await?;
         
         Ok(())
@@ -148,7 +134,6 @@ impl AuthenticationTester {
     
     /// Process the authentication response
     async fn process_response(&self, response: reqwest::Response, server_url: String) -> Result<(), Box<dyn Error>> {
-        // Handle response based on status code
         match response.status() {
             reqwest::StatusCode::OK => {
                 println!("\n✅ Authentication successful!");
@@ -158,7 +143,6 @@ impl AuthenticationTester {
                     println!("Access token received! (not displayed for security)");
                     println!("Token length: {}", token.as_str().unwrap_or_default().len());
                     
-                    // Save token to a file for future use
                     let token_info = serde_json::json!({
                         "server": server_url,
                         "user_id": json_response.get("User").and_then(|u| u.get("Id")).and_then(|id| id.as_str()).unwrap_or_default(),
@@ -178,7 +162,6 @@ impl AuthenticationTester {
             },
             reqwest::StatusCode::FOUND | reqwest::StatusCode::MOVED_PERMANENTLY | 
             reqwest::StatusCode::TEMPORARY_REDIRECT | reqwest::StatusCode::PERMANENT_REDIRECT => {
-                // Handle redirects manually since we disabled automatic redirects
                 if let Some(location) = response.headers().get(reqwest::header::LOCATION) {
                     println!("\n🔄 Server redirected us to: {}", location.to_str()?);
                     println!("Try using this URL instead in your credentials.json file.");
@@ -213,10 +196,8 @@ impl AuthenticationTester {
 async fn main() -> Result<(), Box<dyn Error>> {
     println!("\n🔐 Jellyfin Authentication Test");
     
-    // Default credentials path
     let credentials_path = Path::new("credentials.json");
     
-    // Create tester and run test
     let tester = AuthenticationTester::new(credentials_path)?;
     tester.test_authentication().await?;
     

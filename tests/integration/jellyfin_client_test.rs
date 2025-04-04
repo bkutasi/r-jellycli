@@ -10,7 +10,6 @@ use std::error::Error;
 mod jellyfin_integration_tests {
     use super::*;
 
-    /// Test the client initialization with settings
     #[test]
     fn test_client_init_with_settings() {
         let settings = Settings {
@@ -31,7 +30,6 @@ mod jellyfin_integration_tests {
         assert_eq!(client.get_user_id().unwrap(), "test-user-id");
     }
 
-    /// Test stream URL generation with different parameters
     #[test]
     fn test_stream_url_generation() {
         let client = JellyfinClient::new("https://test-server.com")
@@ -41,12 +39,9 @@ mod jellyfin_integration_tests {
         assert_eq!(url, "https://test-server.com/Audio/item123/stream?static=true&api_key=test-api-key");
     }
     
-    /// This test requires a real Jellyfin server and is ignored by default
     #[tokio::test]
     #[ignore]
     async fn test_get_items() -> Result<(), Box<dyn Error>> {
-        // This test would be run manually with `cargo test -- --ignored`
-        // when a real Jellyfin server is available
         let client = JellyfinClient::new("https://your-server.com")
             .with_api_key("your-api-key")
             .with_user_id("your-user-id");

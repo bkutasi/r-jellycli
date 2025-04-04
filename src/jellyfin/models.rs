@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Represents a media item in a Jellyfin library
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)] // Added PartialEq
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct MediaItem {
     #[serde(rename = "Id")]
     pub id: String,
@@ -18,7 +18,7 @@ pub struct MediaItem {
     #[serde(rename = "IsFolder", default)]
     pub is_folder: bool,
     #[serde(rename = "RunTimeTicks", default)]
-    pub run_time_ticks: Option<i64>, // Duration in 100-nanosecond units
+    pub run_time_ticks: Option<i64>,
 }
 
 /// Represents a collection of media items with additional metadata
@@ -121,14 +121,13 @@ pub enum GeneralCommandType {
     SetSubtitleStreamIndex,
     SetRepeatMode,
     SetShuffleQueue,
-    PlayState, // Keep for incoming messages, but maybe not for advertising capabilities?
-    PlayNext, // Keep for incoming messages? Or use NextTrack? Let's keep both for now.
+    PlayState,
+    PlayNext,
 
     // Other Commands (Keep existing ones)
     PlayMediaSource,
     PlayTrailers,
     SetMaxStreamingBitrate,
-    // SetPlaybackOrder, // Seems less common for basic remote control, comment out for now
 }
 
 /// Represents the client capabilities sent to the server.
@@ -142,10 +141,10 @@ pub struct ClientCapabilitiesDto {
     pub supports_media_control: bool,
     #[serde(rename = "SupportsPersistentIdentifier")]
     pub supports_persistent_identifier: bool,
-    #[serde(rename = "DeviceProfile")] // Removed skip_serializing_if
-    pub device_profile: Option<serde_json::Value>, // Using Value for simplicity, can be refined if needed
-    #[serde(rename = "AppStoreUrl")]   // Removed skip_serializing_if
+    #[serde(rename = "DeviceProfile")]
+    pub device_profile: Option<serde_json::Value>,
+    #[serde(rename = "AppStoreUrl")]
     pub app_store_url: Option<String>,
-    #[serde(rename = "IconUrl")]     // Removed skip_serializing_if
+    #[serde(rename = "IconUrl")]
     pub icon_url: Option<String>,
 }

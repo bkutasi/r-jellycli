@@ -19,26 +19,20 @@ mod tests {
     
     #[test]
     fn test_settings_save_and_load() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a temporary directory for our test
         let dir = tempdir()?;
         let config_path = dir.path().join("config.json");
         
-        // Create test settings
         let mut settings = Settings::default();
         settings.server_url = "https://test-server.com".to_string();
         settings.api_key = Some("test-api-key".to_string());
         settings.username = Some("test-user".to_string());
         
-        // Save settings
         settings.save(&config_path)?;
         
-        // Verify file exists
         assert!(config_path.exists());
         
-        // Load settings
         let loaded = Settings::load(&config_path)?;
         
-        // Verify loaded settings match what we saved
         assert_eq!(loaded.server_url, "https://test-server.com");
         assert_eq!(loaded.api_key, Some("test-api-key".to_string()));
         assert_eq!(loaded.username, Some("test-user".to_string()));
@@ -49,7 +43,6 @@ mod tests {
     
     #[test]
     fn test_settings_validation() {
-        // Valid settings
         let valid_settings = Settings {
             server_url: "https://test-server.com".to_string(),
             api_key: Some("test-api-key".to_string()),
@@ -61,7 +54,6 @@ mod tests {
         };
         assert!(valid_settings.validate().is_ok());
         
-        // Invalid settings - empty server URL
         let invalid_settings = Settings {
             server_url: "".to_string(),
             api_key: Some("test-api-key".to_string()),

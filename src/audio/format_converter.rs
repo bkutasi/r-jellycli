@@ -1,8 +1,6 @@
 use tracing::warn;
 // Use AudioBufferRef for dynamic dispatch based on the underlying buffer type
 use symphonia::core::audio::AudioBufferRef; // Removed unused SignalSpec
-// Import Sample trait for S24 handling
-// Removed unused symphonia::core::sample::Sample
 
 
 const LOG_TARGET: &str = "r_jellycli::audio::format_converter";
@@ -15,10 +13,10 @@ pub fn convert_ref_to_s16(audio_buf_ref: AudioBufferRef) -> Option<Vec<i16>> {
     let num_frames = audio_buf_ref.frames();
     let num_channels = spec.channels.count();
     if num_channels == 0 || num_frames == 0 {
-        return Some(Vec::new()); // Return empty vec for empty input
+        return Some(Vec::new());
     }
 
-    let mut s16_vec = vec![0i16; num_frames * num_channels]; // Pre-allocate
+    let mut s16_vec = vec![0i16; num_frames * num_channels];
 
     // Helper macro for interleaving different sample types
     macro_rules! interleave {
@@ -64,7 +62,6 @@ pub fn convert_ref_to_s16(audio_buf_ref: AudioBufferRef) -> Option<Vec<i16>> {
         AudioBufferRef::S24(buf) => { // S24 is special, packed in i32
             let planes = buf.planes();
             let channel_planes = planes.planes();
-             // Bounds check
             if channel_planes.len() != num_channels { warn!(target: LOG_TARGET, "S24 Plane count mismatch"); return None; }
             if num_channels > 0 && channel_planes[0].len() != num_frames { warn!(target: LOG_TARGET, "S24 Frame count mismatch (Plane 0)"); return None; }
 
@@ -89,10 +86,9 @@ pub fn convert_ref_to_s16(audio_buf_ref: AudioBufferRef) -> Option<Vec<i16>> {
         AudioBufferRef::S32(buf) => { let planes = buf.planes(); interleave!(planes, frame, ch, i32, |s: i32| (s >> 16) as i16); },
         AudioBufferRef::F32(buf) => { let planes = buf.planes(); interleave!(planes, frame, ch, f32, |s: f32| (s * 32767.0).clamp(-32768.0, 32767.0) as i16); },
         // Add F64 if needed and supported by ALSA target format (S16LE here)
-        // AudioBufferRef::F64(buf) => interleave!(buf.planes(), frame, ch, f64, |s: f64| (s * 32767.0).clamp(-32768.0, 32767.0) as i16),
         _ => {
             warn!(target: LOG_TARGET, "Unsupported audio format for S16LE conversion: {:?}", spec);
-            return None; // Indicate unsupported format
+            return None;
         }
     }
     Some(s16_vec)

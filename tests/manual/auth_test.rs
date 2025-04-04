@@ -3,7 +3,6 @@
 //! This utility can be used to test authentication with a Jellyfin server.
 //! Run with: cargo run --bin auth_test
 
-// We need to access the crate through the crate name 'r_jellycli'
 use r_jellycli::jellyfin::authenticate;
 use std::error::Error;
 use std::path::Path;
@@ -21,11 +20,9 @@ struct AuthTester {
 impl AuthTester {
     /// Create a new authentication tester
     fn new(credentials_path: &Path) -> Result<Self, Box<dyn Error>> {
-        // Load credentials
         println!("Loading credentials from {}...", credentials_path.display());
         let credentials = test_utils::load_credentials(credentials_path)?;
         
-        // Create HTTP client with extended timeout
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()?;
@@ -72,7 +69,6 @@ impl AuthTester {
     async fn test_alternative_auth(&self) -> Result<Option<String>, Box<dyn Error>> {
         println!("\nTrying alternative endpoint format...");
         
-        // Try the alternative endpoint format
         let alt_server_url = if self.credentials.server_url.ends_with("/emby") {
             self.credentials.server_url.clone()
         } else {
@@ -101,8 +97,6 @@ impl AuthTester {
     
     /// Test user data fetch with token
     async fn test_user_info(&self, token: &str) -> Result<(), Box<dyn Error>> {
-        // Get user ID from the credentials (not ideal, but works for the test)
-        // In a real implementation, we'd extract this from the token
         let user_info_url = format!("{}/Users/{}", 
                                   self.credentials.server_url,
                                   "Me");
@@ -130,19 +124,14 @@ impl AuthTester {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Default credentials path
     let credentials_path = Path::new("credentials.json");
     
-    // Create auth tester
     let tester = AuthTester::new(credentials_path)?;
     tester.display_credentials_info();
     
-    // Try standard authentication
     if let Some(token) = tester.test_standard_auth().await? {
-        // If we have a token, test user info
         tester.test_user_info(&token).await?;
     } else {
-        // Try alternative endpoint
         if let Some(token) = tester.test_alternative_auth().await? {
             tester.test_user_info(&token).await?;
         } else {

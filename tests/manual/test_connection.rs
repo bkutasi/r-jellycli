@@ -34,7 +34,6 @@ struct ConnectionTester {
 impl ConnectionTester {
     /// Create a new connection tester
     fn new(args: Args) -> Self {
-        // Create the HTTP client
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -88,12 +87,10 @@ impl ConnectionTester {
     
     /// Test authentication endpoint
     async fn test_authentication(&self) -> Result<(), Box<dyn Error>> {
-        // Only run if we have credentials
         if let (Some(username), Some(password)) = (self.username.as_ref(), self.password.as_ref()) {
             println!("\n3. Testing authentication...");
             let auth_url = format!("{}/Users/AuthenticateByName", self.server_url);
             
-            // Construct auth request payload
             #[derive(serde::Serialize, Debug)]
             struct AuthRequest {
                 #[serde(rename = "Username")]
@@ -107,14 +104,11 @@ impl ConnectionTester {
                 pw: password.clone(),
             };
             
-            // Print the request we're about to send
             println!("Auth request URL: {}", auth_url);
             println!("Auth request payload: Username={}, Pw=[REDACTED]", username);
             
-            // Try different authentication methods
             println!("\n3.1 Testing authentication with json payload...");
             
-            // Send authentication request with json payload
             match self.client
                 .post(&auth_url)
                 .header("Content-Type", "application/json")
@@ -135,7 +129,6 @@ impl ConnectionTester {
                 }
             }
             
-            // Try a different approach with a GET request (should return docs or error)
             println!("\n3.2 Testing simple GET to auth URL...");
             match self.client.get(&auth_url).send().await {
                 Ok(resp) => {
@@ -175,7 +168,6 @@ impl ConnectionTester {
     
     /// Run all tests
     async fn run_all_tests(&self) -> Result<(), Box<dyn Error>> {
-        // Run all tests in sequence
         self.test_basic_connectivity().await?;
         self.test_system_info().await?;
         self.test_authentication().await?;
@@ -189,10 +181,8 @@ impl ConnectionTester {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Parse command-line arguments
     let args = Args::parse();
     
-    // Create and run the connection tester
     let tester = ConnectionTester::new(args);
     tester.run_all_tests().await?;
     

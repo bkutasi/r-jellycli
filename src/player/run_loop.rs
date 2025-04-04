@@ -1,21 +1,19 @@
-// src/player/run_loop.rs
-use super::{Player, InternalPlayerStateUpdate, PlayerCommand, PLAYER_LOG_TARGET, command_handler}; // Use re-exported types
+use crate::audio::playback::AudioPlaybackControl;
+use super::{Player, InternalPlayerStateUpdate, PlayerCommand, PLAYER_LOG_TARGET, command_handler};
 use std::time::Duration as StdDuration;
 use tokio::time::interval;
-use tracing::{error, info, trace, warn}; // Removed unused debug
+use tracing::{error, info, trace, warn};
 
 /// Runs the player's command processing loop.
 pub async fn run_player_loop(player: &mut Player) {
     info!(target: PLAYER_LOG_TARGET, "Player run loop started.");
 
-    // Periodic progress reporting timer
-    let mut progress_report_interval = interval(StdDuration::from_secs(5)); // Report every 5s
+    let mut progress_report_interval = interval(StdDuration::from_secs(5));
 
     loop {
         tokio::select! {
             biased; // Check commands first
 
-            // --- Command Processing ---
             Some(command) = player.command_rx.recv() => {
                 trace!(target: PLAYER_LOG_TARGET, "Received command: {:?}", command);
                 match command {
@@ -23,101 +21,113 @@ pub async fn run_player_loop(player: &mut Player) {
                     PlayerCommand::AddToQueue { item_ids } => command_handler::handle_add_to_queue(player, item_ids).await,
                     PlayerCommand::ClearQueue => command_handler::handle_clear_queue(player).await,
                     PlayerCommand::PlayPauseToggle => command_handler::handle_play_pause_toggle(player).await,
-                    // PlayerCommand::Stop removed
                     PlayerCommand::Next => command_handler::handle_next(player).await,
                     PlayerCommand::Previous => command_handler::handle_previous(player).await,
-                    // PlayerCommand::SetVolume removed
-                    // PlayerCommand::SetMute removed
                     PlayerCommand::GetFullState(responder) => {
-                        // Directly call get_full_state from Player struct
                         let state = player.get_full_state().await;
-                        let _ = responder.send(state); // Ignore error if receiver dropped
+                        let _ = responder.send(state);
                     }
                     PlayerCommand::TrackFinished => command_handler::handle_track_finished(player).await,
                     PlayerCommand::Shutdown => {
                         info!(target: PLAYER_LOG_TARGET, "Shutdown command received. Exiting run loop.");
-                        // Stop playback implicitly by breaking the loop.
-                        // The audio task manager will be stopped in the final cleanup section.
-                        let stopped_item_id = player.current_item_id.clone(); // Get ID before clearing state
-                        // if let Some(manager) = player.audio_task_manager.take() { // REMOVED - Handled after loop
-                        //      info!(target: PLAYER_LOG_TARGET, "Stopping audio task manager due to Shutdown command.");
-                        //      stopped_item_id = Some(manager.item_id().to_string());
-                        //      manager.stop_task().await;
-                        // }
-                        // Update state after stopping
+                        let stopped_item_id = player.current_item_id.clone();
                         player.is_playing = false;
                         *player.is_paused.lock().await = false;
-                        player.current_item_id = None; // Clear current item ID after potential stop report
+                        player.current_item_id = None;
 
-                        // Report stop if something was playing (manager existed)
                         if stopped_item_id.is_some() {
-                             let _final_position = player.get_current_position().await; // Prefix unused variable
-                             let snapshot = player.get_playback_state_snapshot().await; // Get snapshot after state update
+                             let _final_position = player.get_current_position().await;
+                             let snapshot = player.get_playback_state_snapshot().await;
                              player.reporter.report_playback_stop(&snapshot, false).await;
                         }
 
-                        player.broadcast_update(InternalPlayerStateUpdate::Stopped); // Broadcast internal stop
-                        break; // Exit the loop
+                        player.broadcast_update(InternalPlayerStateUpdate::Stopped);
+                        break;
                     }
                 }
             }
 
-             // --- Handle Audio Task Completion ---
-             // Poll the JoinHandle from the AudioTaskManager if it exists
-             // --- Handle Audio Task Completion ---
-             // Correctly handle polling the JoinHandle within select!
-             // We need to check if the manager exists *before* trying to poll its handle.
-             // The `if` guard applies to the *branch*, not the future polling directly.
-             res = async { player.audio_task_manager.as_mut().unwrap().handle().await }, if player.audio_task_manager.is_some() => {
-                 // Task finished, remove the manager instance.
-                 // We know it exists because of the `if` guard.
+             join_result = async { player.audio_task_manager.as_mut().unwrap().handle().await }, if player.audio_task_manager.is_some() => {
+                 // Task handle completed, take ownership of the manager
                  let finished_manager = player.audio_task_manager.take().unwrap();
-                 info!(target: PLAYER_LOG_TARGET, item_id = %finished_manager.item_id(), "Audio task finished polling (completed or panicked)."); // Use getter
+                 let item_id = finished_manager.item_id().to_string(); // Clone item_id for logging
 
-                 // Check if the task panicked
-                 if let Err(e) = res {
-                      error!(target: PLAYER_LOG_TARGET, item_id = %finished_manager.item_id(), "Audio task panicked: {:?}", e); // Use getter
-                 } else {
-                      trace!(target: PLAYER_LOG_TARGET, item_id = %finished_manager.item_id(), "Audio task completed polling gracefully."); // Use getter
+                 let mut unexpected_stop = false;
+                 let mut stop_reason = "unknown";
+
+                 match join_result {
+                     Ok(Ok(())) => {
+                         // Task joined successfully, and the inner play() returned Ok(())
+                         // This means EndOfStream or ShutdownSignal was handled internally by the audio task.
+                         // The TrackFinished or Shutdown command should handle the player state update.
+                         info!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task completed successfully (EndOfStream or Shutdown).");
+                         // No state change needed here, should be handled by commands.
+                     }
+                     Ok(Err(ref audio_err)) => {
+                          // Task joined successfully, but the inner play() returned an error
+                         error!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task finished with internal error: {}", audio_err);
+                         unexpected_stop = true;
+                         stop_reason = "internal audio error";
+                     }
+                     Err(ref join_err) => {
+                         // Task failed to join (panic, cancellation, etc.)
+                         if join_err.is_panic() {
+                              error!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task panicked: {:?}", join_err);
+                              stop_reason = "task panic";
+                         } else if join_err.is_cancelled() {
+                              // Cancellation can happen during normal stop/clear queue, or if aborted by timeout.
+                              // We might not want to treat all cancellations as "unexpected".
+                              // However, if the player *thinks* it's playing, a cancellation is unexpected from its POV.
+                              info!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task was cancelled.");
+                              stop_reason = "task cancelled";
+                         } else {
+                              error!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task join error: {:?}", join_err);
+                              stop_reason = "task join error";
+                         }
+                         unexpected_stop = true;
+                     }
                  }
 
-                 // Regardless of panic or normal completion, if the task finishes *here*,
-                 // it means it wasn't due to a natural end-of-track (which sends TrackFinished)
-                 // or an explicit stop command. Treat it as an unexpected stop.
-                 if player.is_playing { // Only report stop if we thought we were playing
-                     warn!(target: PLAYER_LOG_TARGET, item_id = %finished_manager.item_id(), "Audio task stopped unexpectedly (detected via JoinHandle). Reporting stop and clearing state."); // Use getter
-                     // let stopped_item_id = player.current_item_id.clone(); // Already have item_id in finished_manager
-                     let _final_position = player.get_current_position().await; // Prefix unused variable
+                 // If an unexpected stop occurred *and* the player thought it was playing, log warning and clean up state.
+                 // --- Debug Logging ---
+                 trace!(
+                     target: PLAYER_LOG_TARGET, item_id = %item_id,
+                     "Audio task handle completed. join_result_is_ok: {}, join_result_inner_is_ok: {}, unexpected_stop: {}, player.is_playing: {}",
+                     join_result.is_ok(), join_result.as_ref().map(|r| r.is_ok()).unwrap_or(false), unexpected_stop, player.is_playing
+                 );
+                 // --- End Debug Logging ---
+                 if unexpected_stop && player.is_playing {
+                     warn!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task stopped unexpectedly (Reason: {}). Reporting stop and clearing state.", stop_reason);
+                     let _final_position = player.get_current_position().await; // Get position before clearing
                      player.is_playing = false;
-                     *player.is_paused.lock().await = false;
+                     *player.is_paused.lock().await = false; // Ensure pause state is reset
                      player.current_item_id = None;
-                     // Report incomplete stop using the state snapshot before clearing
-                     let snapshot = player.get_playback_state_snapshot().await; // Get snapshot before state is fully cleared
-                     player.reporter.report_playback_stop(&snapshot, false).await; // Use reporter
+                     let snapshot = player.get_playback_state_snapshot().await;
+                     player.reporter.report_playback_stop(&snapshot, false).await;
                      player.broadcast_update(InternalPlayerStateUpdate::Stopped);
+                 } else if unexpected_stop {
+                     // Log if it stopped unexpectedly but the player was already stopped/paused
+                     trace!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task stopped unexpectedly (Reason: {}), but player was already stopped/paused. No state change needed.", stop_reason);
                  } else {
-                     trace!(target: PLAYER_LOG_TARGET, item_id = %finished_manager.item_id(), "Audio task finished polling while player was already stopped/paused. No state change needed."); // Use getter
+                     // Log if it stopped expectedly (Ok(Ok(())))
+                     trace!(target: PLAYER_LOG_TARGET, item_id = %item_id, "Audio task finished expectedly. Player state should be handled by TrackFinished/Shutdown command.");
                  }
              }
 
-            // --- Periodic Progress Reporting ---
              _ = progress_report_interval.tick(), if player.is_playing && !*player.is_paused.lock().await => {
                 trace!(target: PLAYER_LOG_TARGET, "Progress report interval ticked.");
-                // Report progress via HTTP POST
-                let snapshot = player.get_playback_state_snapshot().await; // Call snapshot method on player
-                player.reporter.report_playback_progress(&snapshot).await; // Use reporter
+                let snapshot = player.get_playback_state_snapshot().await;
+                player.reporter.report_playback_progress(&snapshot).await;
 
-                // Also broadcast internal progress update
                 if let Some(id) = player.current_item_id.clone() {
                      player.broadcast_update(InternalPlayerStateUpdate::Progress {
                          item_id: id,
-                         position_ticks: player.get_current_position().await, // Call position method on player
+                         position_ticks: player.get_current_position().await,
                      });
                 }
             }
 
             else => {
-                // All channels closed or error occurred, break the loop
                 info!(target: PLAYER_LOG_TARGET, "Command channel closed or select! error. Exiting run loop.");
                 break;
             }
@@ -125,12 +135,10 @@ pub async fn run_player_loop(player: &mut Player) {
     }
 
     info!(target: PLAYER_LOG_TARGET, "Player run loop finished. Performing final cleanup.");
-    // 1. Ensure any active audio task is stopped
     if let Some(manager) = player.audio_task_manager.take() {
          info!(target: PLAYER_LOG_TARGET, "Stopping active audio task manager during final cleanup.");
-         manager.stop_task().await; // Await task completion
+         manager.stop_task().await;
     }
-    // 2. Explicitly shut down the shared audio backend
     info!(target: PLAYER_LOG_TARGET, "Shutting down shared audio backend...");
     match player.audio_backend.lock().await.shutdown().await {
         Ok(_) => info!(target: PLAYER_LOG_TARGET, "Shared audio backend shutdown successful."),

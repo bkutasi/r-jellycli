@@ -11,8 +11,8 @@ pub enum AudioError {
     SymphoniaError(SymphoniaError),
     IoError(io::Error),
     NetworkError(reqwest::Error),
-    InvalidState(String), // Changed to accept owned String
-    UnsupportedFormat(String), // Changed to accept owned String
+    InvalidState(String),
+    UnsupportedFormat(String),
     MissingCodecParams(&'static str),
     TaskJoinError(String),
     InitializationError(String),
@@ -20,6 +20,7 @@ pub enum AudioError {
     ResamplingError(String), // Added for resampling errors
     UnsupportedOperation(String), // Added for operations not supported by the backend
     ShutdownRequested,     // Playback was stopped by a shutdown signal
+    EmptyStream,           // Decoder reached EOF immediately, likely empty or invalid stream
 }
 
 impl std::fmt::Display for AudioError {
@@ -36,10 +37,11 @@ impl std::fmt::Display for AudioError {
             AudioError::MissingCodecParams(s) => write!(f, "Missing codec parameters: {}", s),
             AudioError::TaskJoinError(e) => write!(f, "Async task join error: {}", e),
             AudioError::InitializationError(e) => write!(f, "Initialization error: {}", e),
-            AudioError::PlaybackError(e) => write!(f, "Playback error: {}", e), // Added display for PlaybackError
-            AudioError::ResamplingError(e) => write!(f, "Resampling error: {}", e), // Added display for ResamplingError
-            AudioError::UnsupportedOperation(e) => write!(f, "Unsupported operation: {}", e), // Added display for UnsupportedOperation
+            AudioError::PlaybackError(e) => write!(f, "Playback error: {}", e),
+            AudioError::ResamplingError(e) => write!(f, "Resampling error: {}", e),
+            AudioError::UnsupportedOperation(e) => write!(f, "Unsupported operation: {}", e),
             AudioError::ShutdownRequested => write!(f, "Playback stopped due to shutdown signal"),
+            AudioError::EmptyStream => write!(f, "Stream is empty or invalid (immediate EOF)"),
         }
     }
 }

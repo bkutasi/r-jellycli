@@ -27,21 +27,17 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Parse command-line arguments
     let args = Args::parse();
     
-    // Display input information (without showing password)
     println!("Server URL: {}", args.server_url);
     println!("Username: {}", args.username);
     println!("Password length: {}", args.password.len());
     println!("Raw password bytes: {:?}", args.password.as_bytes());
     
-    // Create HTTP client with extended timeout
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
     
-    // Test authentication using the exact same function as auth_test
     println!("\nTesting authentication to Jellyfin server...");
     match authenticate(&client, &args.server_url, &args.username, &args.password).await {
         Ok(auth_response) => {

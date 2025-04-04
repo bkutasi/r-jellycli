@@ -126,6 +126,13 @@
         *   Handle potentially blocking I/O operations during cleanup (like `alsa::PCM::close()`) carefully, potentially using `tokio::task::spawn_blocking` or implementing timeouts if they risk deadlocking the shutdown process.
         *   The `async fn shutdown` pattern (avoiding blocking ops in `Drop`) is necessary but must be combined with explicit task joining and careful handling of blocking resource cleanup.
 
+
+3.  **Task Lifecycle Management in Modular Systems (Audio Refactoring)**:
+    *   **Problem**: During the refactoring of the audio subsystem (`src/audio/`) into smaller modules (`loop_runner.rs`, `processor.rs`, `alsa_writer.rs`, `state_manager.rs`), issues arose with tasks terminating prematurely or not cleaning up resources correctly, leading to playback failures or hangs.
+    *   **Challenge**: Ensuring that the interconnected tasks within the refactored audio module manage their lifecycles correctly, handle errors gracefully, and coordinate shutdown signals effectively.
+    *   **Lesson**: Breaking down a complex task (like audio playback) into smaller, cooperating asynchronous tasks requires careful design of communication channels (e.g., for data flow, state updates, shutdown signals) and error propagation. Each task must handle its specific errors and signal failure appropriately to its coordinator (e.g., `loop_runner` or `audio_task_manager`). Furthermore, ensuring that resources (like ALSA handles or shared state via `state_manager`) are consistently managed and released across these tasks, even in error scenarios, is critical to prevent deadlocks or unexpected terminations.
+    *   **Pattern**: Use clear ownership or shared ownership (`Arc`) for resources. Employ channels (like `tokio::sync::mpsc` or `watch`) for state and data flow. Propagate errors upwards using `Result` types. Ensure coordinator tasks `await` child tasks during shutdown or error recovery.
+
 1. **Thread Safety Issues**
    - **Problem**: Box<dyn StdError> was not Send + Sync safe.
    - **Solution**: Properly wrapped errors in std::io::Error with string messages instead of passing raw dynamic error types.

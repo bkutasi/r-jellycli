@@ -2,8 +2,8 @@ use crate::audio::AudioError;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use tracing::{debug, info, trace, error}; // Added error
-use std::io::{self, Read, Seek, SeekFrom}; // Removed Cursor
+use tracing::{debug, info, trace, error};
+use std::io::{self, Read, Seek, SeekFrom};
 use symphonia::core::io::MediaSource;
 
 const LOG_TARGET: &str = "r_jellycli::audio::stream_wrapper";
@@ -14,36 +14,38 @@ const LOG_TARGET: &str = "r_jellycli::audio::stream_wrapper";
 /// **Warning:** This defeats true streaming playback and can consume significant
 /// memory for large files. A future improvement would be a true streaming adapter.
 pub struct ReqwestStreamWrapper {
-    buffer: Vec<u8>,      // Store buffer directly
-    position: u64,        // Manual position tracking
+    buffer: Vec<u8>,
+    position: u64,
 }
 
 impl ReqwestStreamWrapper {
     /// Creates a new wrapper by asynchronously downloading the entire stream content.
     /// Returns an io::Error if the stream is empty after download.
-    pub async fn new_async( // Changed return type
+    pub async fn new_async(
         stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
-    ) -> Result<Self, io::Error> { // Changed return type
+    ) -> Result<Self, io::Error> {
         let mut buffer = Vec::new();
-        let mut stream = stream; // Shadowing is fine here
+        let mut stream = stream;
 
         debug!(target: LOG_TARGET, "Pre-downloading audio stream into memory...");
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Error reading stream chunk: {}", e)))?;
             buffer.extend_from_slice(&chunk);
+            trace!(target: LOG_TARGET, "Downloaded chunk size: {}, total buffer size: {}", chunk.len(), buffer.len());
             trace!(target: LOG_TARGET, "Downloaded {} bytes (total {})", chunk.len(), buffer.len());
         }
         // Check if any data was actually downloaded
         if buffer.is_empty() {
             error!(target: LOG_TARGET, "Pre-download complete but buffer is empty. Stream likely closed prematurely.");
-            // Return a standard io::Error
+            error!(target: LOG_TARGET, "Stream download loop finished, but final buffer is empty.");
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Downloaded stream was empty"));
         }
         info!(target: LOG_TARGET, "Pre-download complete ({} bytes). Creating buffered source.", buffer.len());
+        info!(target: LOG_TARGET, "Stream download loop finished. Final buffer size: {}", buffer.len());
 
         Ok(Self {
             buffer,
-            position: 0, // Initialize position
+            position: 0,
         })
     }
 }
@@ -52,7 +54,7 @@ impl Read for ReqwestStreamWrapper {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let current_pos = self.position as usize;
         if current_pos >= self.buffer.len() {
-            return Ok(0); // EOF
+            return Ok(0);
         }
         let remaining = self.buffer.len() - current_pos;
         let can_read = std::cmp::min(buf.len(), remaining);
@@ -102,13 +104,10 @@ impl Seek for ReqwestStreamWrapper {
 
 impl MediaSource for ReqwestStreamWrapper {
     fn is_seekable(&self) -> bool {
-        true // We now support seeking manually
+        true
     }
 
     fn byte_len(&self) -> Option<u64> {
-        Some(self.buffer.len() as u64) // Get length directly from Vec
+        Some(self.buffer.len() as u64)
     }
 }
-
-// io::Cursor<Vec<u8>> is Send + Sync, so ReqwestStreamWrapper is too.
-// No need for unsafe impls.

@@ -73,7 +73,7 @@ impl Settings {
             username: None,
             alsa_device: default_alsa_device(),
             user_id: None,
-            device_id: None, // Initialize device_id as None
+            device_id: None,
         }
     }
 

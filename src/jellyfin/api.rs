@@ -4,19 +4,17 @@ use crate::player::{PlayerCommand, InternalPlayerStateUpdate};
 use crate::jellyfin::{PlaybackStartReport, PlaybackProgressReport, PlaybackStopReport};
 use serde::Serialize;
 
-use tracing::{debug, info, warn, error, trace}; // Added for tracing macros
+use tracing::{debug, info, warn, error, trace};
 use tracing::instrument;
 use crate::jellyfin::models::{ItemsResponse, MediaItem, AuthResponse};
 use crate::jellyfin::session::SessionManager;
 use crate::jellyfin::WebSocketHandler;
-// Removed unused import: use crate::player::Player;
-// Removed unused import: use std::sync::atomic::AtomicBool;
 use reqwest::{Client, Error as ReqwestError, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex}; // Add broadcast, Added mpsc
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -35,14 +33,13 @@ pub struct JellyfinClient {
 
 /// Error types for Jellyfin API operations
 #[derive(Debug)]
-// Removed Clone derive as ReqwestError doesn't implement it
 pub enum JellyfinError {
     Network(ReqwestError),
     Authentication(String),
     NotFound(String),
     InvalidResponse(String),
     WebSocketError(String),
-    Other(String), // Simplified Other to hold a String description
+    Other(String),
 }
 
 // --- Error Implementations ---
@@ -75,7 +72,6 @@ impl From<ReqwestError> for JellyfinError {
     }
 }
 
-// Helper to convert generic errors to JellyfinError::Other
 fn _other_error<E: Error + Send + Sync + 'static>(context: &str, err: E) -> JellyfinError {
     JellyfinError::Other(format!("{}: {}", context, err))
 }
@@ -92,7 +88,6 @@ pub trait JellyfinApiContract: Send + Sync {
     async fn report_playback_stopped(&self, report: &PlaybackStopReport) -> Result<(), JellyfinError>;
     async fn report_playback_progress(&self, report: &PlaybackProgressReport) -> Result<(), JellyfinError>;
     fn play_session_id(&self) -> &str;
-    // Add other methods used by consumers if necessary
 }
 
 // --- JellyfinClient Implementation ---
@@ -156,7 +151,7 @@ impl JellyfinClient {
 
     /// Builds a full URL for an API endpoint path.
     fn build_url(&self, path: &str) -> String {
-        format!("{}{}", self.server_url, path) // Remove semicolon to return value
+        format!("{}{}", self.server_url, path)
 
 
 
@@ -222,7 +217,7 @@ impl JellyfinClient {
         let response = self.client
             .post(&url)
             .header("X-Emby-Token", api_key)
-            .json(body) // Automatically sets Content-Type: application/json
+            .json(body)
             .send()
             .await?;
 
@@ -302,16 +297,16 @@ impl JellyfinClient {
         &mut self,
         api_key: &str,
         device_id: &str,
-        shutdown_tx: broadcast::Sender<()>, // Change parameter type
+        shutdown_tx: broadcast::Sender<()>,
     ) -> Result<(), JellyfinError> {
         debug!("Initializing WebSocket handler with DeviceId: {}", device_id);
 
         let mut ws_handler = WebSocketHandler::new(
-            self.clone(), // Clone the client for the handler
+            self.clone(),
             &self.server_url,
             api_key,
             device_id,
-            shutdown_tx, // Pass the sender
+            shutdown_tx,
         );
 
         match ws_handler.connect().await {
@@ -338,7 +333,6 @@ impl JellyfinClient {
     #[instrument(skip(self, password), fields(username))]
     pub async fn authenticate(&mut self, username: &str, password: &str) -> Result<AuthResponse, JellyfinError> {
         info!("Authenticating user: {}", username);
-        // Removed direct connectivity test - rely on the actual auth call
 
         match crate::jellyfin::authenticate(&self.client, &self.server_url, username, password).await {
             Ok(auth_response) => {
@@ -349,19 +343,18 @@ impl JellyfinClient {
             }
             Err(e) => {
                 error!("Authentication failed for user {}: {:?}", username, e);
-                // Assuming authenticate returns a displayable error
                 Err(JellyfinError::Authentication(format!("Authentication failed: {}", e)))
             }
         }
     }
 
     /// Initialize the session manager, report capabilities, and establish WebSocket connection.
-    #[instrument(skip(self, shutdown_tx), fields(device_id))] // Update skip parameter name
-    pub async fn initialize_session(&mut self, device_id: &str, shutdown_tx: broadcast::Sender<()>) -> Result<(), JellyfinError> { // Change parameter type
+    #[instrument(skip(self, shutdown_tx), fields(device_id))]
+    pub async fn initialize_session(&mut self, device_id: &str, shutdown_tx: broadcast::Sender<()>) -> Result<(), JellyfinError> {
         info!("Initializing session with DeviceId: {}", device_id);
 
         let (api_key, user_id) = self.ensure_authenticated()?;
-        let api_key = api_key.to_string(); // Clone needed parts
+        let api_key = api_key.to_string();
         let user_id = user_id.to_string();
 
         debug!("Creating session manager for user_id: {}, play_session_id: {}", user_id, self.play_session_id);
@@ -382,7 +375,7 @@ impl JellyfinClient {
         debug!("Session manager created and stored.");
 
         // Initialize WebSocket
-        self._initialize_websocket(&api_key, device_id, shutdown_tx).await?; // Pass the sender
+        self._initialize_websocket(&api_key, device_id, shutdown_tx).await?;
 
         info!("Session initialization complete.");
         Ok(())
@@ -443,7 +436,6 @@ impl JellyfinClient {
         Ok(url)
     }
 
-    // Removed incorrect _report_playback helper that delegated to SessionManager
 
     /// Report playback started to Jellyfin server via HTTP POST.
     #[instrument(skip(self, report), fields(item_id = %report.base.item_id))]
@@ -467,21 +459,19 @@ impl JellyfinClient {
         self._post_json_no_content("/Sessions/Playing/Stopped", report).await
     }
 
-    // Removed set_player method as WebSocketHandler no longer holds the player directly.
-    // Channels are passed during listener startup.
 
     /// Spawns the WebSocket listener task.
     /// Requires `initialize_session` to have been called successfully.
     #[instrument(skip(self, player_command_tx, player_state_rx, shutdown_rx))]
     pub async fn start_websocket_listener(
         &mut self,
-        player_command_tx: mpsc::Sender<PlayerCommand>, // Sender for commands TO player
-        player_state_rx: broadcast::Receiver<InternalPlayerStateUpdate>, // Receiver for state FROM player
-        shutdown_rx: broadcast::Receiver<()>, // Receiver for app shutdown
+        player_command_tx: mpsc::Sender<PlayerCommand>,
+        player_state_rx: broadcast::Receiver<InternalPlayerStateUpdate>,
+        shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<(), JellyfinError> {
         info!("Attempting to start WebSocket listener task...");
 
-        let ws_handler_arc = match self.websocket_handler.clone() { // Clone Arc to move into task
+        let ws_handler_arc = match self.websocket_handler.clone() {
             Some(arc) => arc,
             None => {
                 error!("Cannot start listener: WebSocket handler not initialized.");
@@ -501,12 +491,11 @@ impl JellyfinClient {
 
         let handle = tokio::spawn(async move {
             trace!("WebSocket listener task started execution.");
-            // Lock the handler Arc within the task to prepare and listen
             let prepared_result = {
                  let mut handler_guard = ws_handler_arc.lock().await;
                  // Pass the necessary channels to prepare_for_listening
                  handler_guard.prepare_for_listening(command_tx_clone, player_state_rx, shutdown_rx)
-            }; // MutexGuard dropped here
+            };
 
             if let Some(mut prepared_handler) = prepared_result {
                 debug!("Prepared handler obtained, starting listen_for_commands loop...");
@@ -521,7 +510,6 @@ impl JellyfinClient {
             debug!("WebSocket listener task finished execution.");
         });
 
-        // Store the handle
         let mut handle_guard = self.websocket_listener_handle.lock().await;
         *handle_guard = Some(handle);
         info!("WebSocket listener task spawned and handle stored.");
@@ -544,7 +532,6 @@ impl JellyfinClient {
     }
 
 
-    // Removed duplicate play_session_id function definition. The original is at line 128.
     // --- Getter methods (primarily for testing/debugging) ---
     pub fn get_server_url(&self) -> &str { &self.server_url }
     pub fn get_api_key(&self) -> Option<&str> { self.api_key.as_deref() }
@@ -556,7 +543,6 @@ impl JellyfinClient {
 #[async_trait::async_trait]
 impl JellyfinApiContract for JellyfinClient {
     async fn get_items_details(&self, item_ids: &[String]) -> Result<Vec<MediaItem>, JellyfinError> {
-        // Delegate to existing method
         JellyfinClient::get_items_details(self, item_ids).await
     }
 

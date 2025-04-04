@@ -22,7 +22,6 @@ pub fn load_credentials<P: AsRef<Path>>(path: P) -> Result<Credentials, Box<dyn 
     Ok(creds)
 }
 
-/// Generates a mock client for testing without server
 #[cfg(test)]
     #[allow(dead_code)]
 pub mod mocks {
@@ -38,7 +37,6 @@ pub mod mocks {
     }
 }
 
-/// Constants for testing
 #[cfg(test)]
     #[allow(dead_code)]
 pub mod constants {

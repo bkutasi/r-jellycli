@@ -1,21 +1,16 @@
 //! Jellyfin session management implementation
 
-// Removed unused import: PlaybackProgressInfo
 
 use reqwest::{Client, Error as ReqwestError};
-use tracing::debug; // Replaced log with tracing
+use tracing::debug;
 use tracing::instrument;
 
-use std::time::SystemTime; // Removed unused Duration
-// Removed unused tokio::time
+use std::time::SystemTime;
 use std::sync::{Arc, Mutex};
 use serde_json;
 use hostname;
-use super::models::{ClientCapabilitiesDto, MediaType, GeneralCommandType}; // Import new models
-// Removed unused imports: PlaybackStartReport, PlaybackStopReport
+use super::models::{ClientCapabilitiesDto, MediaType, GeneralCommandType};
 
-// Removed unused generate_device_id function.
-// Device ID is now handled in main.rs and passed into SessionManager::new.
 
 /// Session manager for maintaining active Jellyfin sessions
 #[derive(Clone)]
@@ -27,14 +22,13 @@ pub struct SessionManager {
     user_id: String,
     device_id: String,
     last_ping: Arc<Mutex<SystemTime>>,
-    play_session_id: String, // Added to store the persistent playback session ID
+    play_session_id: String,
 }
 
 
 impl SessionManager {
     /// Create a new session manager
     pub fn new(client: Client, server_url: String, api_key: String, user_id: String, device_id: String, play_session_id: String) -> Self {
-        // Use the device ID passed in from Settings, instead of generating/loading one here.
         
         debug!(device_id = %device_id, "[SESSION] Using device ID");
         
@@ -44,9 +38,8 @@ impl SessionManager {
             api_key,
             user_id,
             device_id,
-            // session_id field removed
             last_ping: Arc::new(Mutex::new(SystemTime::now())),
-            play_session_id, // Store the passed-in PlaySessionId
+            play_session_id,
         }
     }
 
@@ -68,7 +61,7 @@ impl SessionManager {
             "r-jellycli",
             &hostname,
             self.device_id,
-            "0.1.0" // TODO: Get version from Cargo.toml
+            "0.1.0"
         );
 
         debug!(url = %url, "[SESSION] Reporting capabilities");
@@ -80,18 +73,13 @@ impl SessionManager {
                 // Advertise specific playback control commands as requested
                 GeneralCommandType::PlayState,
                 GeneralCommandType::Play,
-                // Removed VolumeUp
-                // Removed VolumeDown
-                // Removed ToggleMute
-                // Removed SetVolume
                 GeneralCommandType::SetShuffleQueue,
                 GeneralCommandType::SetRepeatMode,
                 GeneralCommandType::PlayNext,
-                // Add other non-playback commands if needed, e.g., GoHome, Select, Back
             ]),
             supports_media_control: true,
-            supports_persistent_identifier: false, // Keep this false as per previous decision
-            device_profile: None, // Set optional fields to None for now
+            supports_persistent_identifier: false,
+            device_profile: None,
             app_store_url: None,
             icon_url: None,
         };
@@ -99,7 +87,7 @@ impl SessionManager {
         // Log the JSON being sent using debug level
         debug!("[SESSION] Sending capabilities JSON payload:\n{}",
             serde_json::to_string_pretty(&capabilities_payload).unwrap_or_else(|e| format!("<JSON serialization error: {}>", e))
-        ); // Removed trailing semicolon here
+        );
 
         // Send capabilities to the server
         let response = self.client
@@ -129,14 +117,12 @@ impl SessionManager {
             // Log a warning and return Ok(()) as the HTTP request itself didn't fail according to reqwest.
             debug!(status = %status, "[SESSION] Warning: Unexpected successful status code. Expected 204 No Content. Treating as success for now.");
             // Consume the response body to avoid resource leaks, though we don't use it.
-            let _ = successful_response.text().await; // Consume the body
+            let _ = successful_response.text().await;
             Ok(())
         }
     }
     
     
-    // Removed start_keep_alive_pings function as per simplification plan.
-    // WebSocket Ping/Pong should handle keep-alive.
     
     
     /// Get the device ID
@@ -145,9 +131,6 @@ impl SessionManager {
         self.device_id.clone()
     }
     
-    // Removed redundant report_playback_progress function. Reporting is handled by Player.
     
-    // Removed redundant report_playback_start function. Reporting is handled by Player.
     
-    // Removed redundant report_playback_stopped function. Reporting is handled by Player.
 }

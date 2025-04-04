@@ -39,10 +39,4 @@ mod tests {
         assert_eq!(url, "http://localhost:8096/Audio/item123/stream?static=true&api_key=test_api_key");
     }
     
-    // Integration tests that require a Jellyfin server would go here
-    // These would be marked with #[ignore] to avoid running them in regular test runs
-    // For example:
-    // #[tokio::test]
-    // #[ignore]
-    // async fn test_authenticate() {...}
 }

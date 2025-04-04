@@ -100,12 +100,16 @@ RUST_LOG=debug cargo run -- --server-url ...
 - `src/main.rs`: Application entry point (binary).
 - `src/lib.rs`: Library root, defining shared modules.
 - `src/audio/`: Audio playback using ALSA. Refactored into multiple modules:
-  - `mod.rs`: Module declaration.
-  - `playback.rs`: Main `AlsaPlayer` struct and playback orchestration logic.
+  - `mod.rs`: Module declaration and re-exports.
+  - `playback.rs`: Simplified entry point/coordinator for the audio subsystem.
+  - `loop_runner.rs`: Manages the main audio processing loop task.
+  - `processor.rs`: Core logic for fetching, processing, and sending audio data.
+  - `alsa_writer.rs`: Handles writing processed audio samples to ALSA.
+  - `state_manager.rs`: Manages shared playback state.
   - `decoder.rs`: Symphonia-based audio decoding.
   - `alsa_handler.rs`: Low-level ALSA PCM interaction.
-  - `stream_wrapper.rs`: Wrapper for the HTTP stream from `reqwest`.
   - `format_converter.rs`: Sample format conversion utilities (including resampling via `rubato`).
+  - `sample_converter.rs`: Lower-level sample conversion logic.
   - `progress.rs`: Playback progress tracking structures and logic.
   - `error.rs`: Audio-specific error types.
 - `src/config/`: Configuration management (`mod.rs`, `settings.rs`).

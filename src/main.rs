@@ -3,7 +3,6 @@ use tracing::{error, info, warn, instrument};
 use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use r_jellycli::config::Settings;
 use r_jellycli::jellyfin::JellyfinClient;
-// Import new Player types
 use r_jellycli::player::{Player, PlayerCommand}; // Removed unused InternalPlayerStateUpdate
 use r_jellycli::ui::Cli;
 use tokio::sync::{broadcast, mpsc}; // Removed Mutex import
@@ -30,7 +29,6 @@ fn setup_player(settings: &Settings, jellyfin_client: JellyfinClient) -> (Player
    const STATE_UPDATE_CAPACITY: usize = 100;
    const COMMAND_BUFFER_SIZE: usize = 50;
 
-   // Create the Player instance using the new constructor
    let (player, player_command_tx) = Player::new(
        Arc::new(jellyfin_client), // Wrap client in Arc
        settings.alsa_device.clone(),
@@ -53,7 +51,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     // Create the cleanup guard. Its Drop impl runs automatically on exit.
-    // let _cleanup_guard = TerminalCleanup; // Removed TerminalCleanup instantiation
 
     // Create a broadcast channel for shutdown signals for background tasks
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -61,8 +58,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = running.clone();
 
-    // Set up Ctrl+C handler
-    let shutdown_tx_clone = shutdown_tx.clone(); // Clone sender for Ctrl+C handler
+    let shutdown_tx_clone = shutdown_tx.clone();
     tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
             r.store(false, std::sync::atomic::Ordering::SeqCst); // Use full path for Ordering
@@ -71,21 +67,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if let Err(e) = terminal::disable_raw_mode() {
                 error!("Failed to disable terminal raw mode in Ctrl+C handler: {}", e);
             }
-            // Signal background tasks
             let _ = shutdown_tx_clone.send(());
         }
     });
 
-    let _init_span = tracing::info_span!("initialization").entered(); // Start init span
+    let _init_span = tracing::info_span!("initialization").entered();
 
-    // Parse command-line arguments and initialize CLI
     let cli = Cli::new();
     let args = &cli.args;
     
-    // Initialize application directories
     init_app_dirs()?;
     
-    // Load configuration from file or create default
     let config_path = match &args.config {
         Some(path) => Path::new(path).to_path_buf(),
         None => Settings::default_path(),
@@ -133,7 +125,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         if args.username.is_none() {
                             settings.username = Some(creds.username);
                         }
-                        // Store password for later use
                         creds_password = creds.password;
                         credentials_loaded = true;
                     },
@@ -178,7 +169,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "default".to_string()
     };
     
-    // Validate settings
     settings.validate()?;
     
     // Ensure device_id is set, generate if missing, and save
@@ -199,13 +189,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             info!("Saved generated Device ID to config file.");
         }
     }
-    // Initialize Jellyfin client
     let mut jellyfin = JellyfinClient::new(&settings.server_url);
 
-    drop(_init_span); // End init span
-    let _auth_span = tracing::info_span!("authentication").entered(); // Start auth span
+    drop(_init_span);
+    let _auth_span = tracing::info_span!("authentication").entered();
 
-    // Authenticate with Jellyfin server
     let password_provided = args.password.is_some() || std::env::var("JELLYFIN_PASSWORD").is_ok();
 
     if password_provided {
@@ -215,11 +203,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Use the password obtained earlier (from args, env var, creds file, or prompt)
             let auth_response = jellyfin.authenticate(username, &password).await?;
 
-            // Save user ID and token to settings
             settings.user_id = Some(auth_response.user.id.clone());
             settings.api_key = Some(auth_response.access_token.clone());
 
-            // Save updated settings to config file
             info!("Authentication successful, saving new credentials...");
             settings.save(&config_path)?;
             // Update the client instance with the new token/user ID immediately
@@ -248,10 +234,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // No username, no password, no API key - cannot authenticate.
         return Err("Cannot authenticate: No username, password, or API key provided or found.".into());
     }
-    drop(_auth_span); // End auth span
+    drop(_auth_span);
 
     // --- Setup Player ---
-    // Create the player instance and its command sender channel
     let (mut player, player_command_tx) = setup_player(&settings, jellyfin.clone());
     // Subscribe to player state updates *before* starting the player task
     let player_state_rx = player.subscribe_state_updates();
@@ -260,13 +245,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Spawn Player Task ---
     let player_task_handle = tokio::spawn(async move {
         info!("Spawning player run loop task...");
-        player.run().await; // Run the player's command processing loop
+        player.run().await;
         info!("Player run loop task finished.");
     });
 
     // --- Initialize Jellyfin Session and Link Player ---
     // This internally calls report_capabilities and starts WebSocket listener
-    let _session_span = tracing::info_span!("session_initialization").entered(); // Start session span
+    let _session_span = tracing::info_span!("session_initialization").entered();
     info!("Initializing Jellyfin session...");
     // 1. Initialize session (reports capabilities, connects WebSocket, creates handler)
     // Pass the shutdown sender clone instead of the running flag Arc
@@ -279,16 +264,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // 2. Start the WebSocket listener task, passing the necessary channels
         // Pass the command sender and state receiver to the listener
         if let Err(e) = jellyfin.start_websocket_listener(
-            player_command_tx.clone(), // Pass command sender
-            player_state_rx,           // Pass state receiver
-            shutdown_tx.subscribe()    // Pass shutdown receiver
+            player_command_tx.clone(),
+            player_state_rx,
+            shutdown_tx.subscribe()
         ).await {
              error!("Failed to start WebSocket listener task: {}", e);
              // This is likely a significant issue, consider if the app should exit.
         } else {
              info!("WebSocket listener task started successfully.");
         }
-        drop(_session_span); // End session span
+        drop(_session_span);
     }
     
     // Check if we're in test mode (just testing authentication)
@@ -303,14 +288,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Background Task Management ---
     // We don't need to manually track task handles here anymore,
     // as the Player instance manages its own playback/reporter tasks.
-    // let mut task_handles = Vec::new();
 
     // Settings are already loaded and used for initialization.
-    // let settings_arc = Arc::new(settings); // Not needed directly here anymore
 
     // --- Main Application Loop ---
-    let _main_loop_span = tracing::info_span!("main_loop").entered(); // Start main loop span
-    // Main application loop
+    let _main_loop_span = tracing::info_span!("main_loop").entered();
     info!("Fetching items from server...");
     let mut current_items = jellyfin.get_items().await?;
     let _shutdown_rx = shutdown_tx.subscribe(); // Receiver for main loop (marked unused)
@@ -319,7 +301,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     'main_loop: while running.load(std::sync::atomic::Ordering::SeqCst) { // Use full path for Ordering
         // Display current items
-        // cli.display_items(&current_items); // Commented out: Redundant initial display before auto-selection
 
         if current_items.is_empty() {
             // Keep eprintln for direct user feedback before exit
@@ -335,7 +316,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             match current_items.iter().position(|item| item.name == "Music") {
                 Some(idx) => {
                     info!("Found 'Music' library at index {}. Selecting.", idx + 1);
-                    selected_index_option = Some(idx); // Set the option
+                    selected_index_option = Some(idx);
                 }
                 None => {
                     error!("'Music' library not found in the initial list!");
@@ -343,7 +324,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if let Err(e) = terminal::disable_raw_mode() {
                          error!("Failed to disable terminal raw mode before exit: {}", e);
                     }
-                    process::exit(1); // Exit gracefully
+                    process::exit(1);
                 }
             }
         } else {
@@ -354,17 +335,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Ok(idx_1_based) if idx_1_based >= 1 && idx_1_based <= current_items.len() => {
                         let idx_0_based = idx_1_based - 1;
                         info!("AUTO_SELECT_OPTION: Selecting item {} ('{}')", idx_1_based, current_items[idx_0_based].name);
-                        Some(idx_0_based) // Set the option for valid selection
+                        Some(idx_0_based)
                     }
                     _ => {
                         warn!("AUTO_SELECT_OPTION ('{}') is invalid or out of bounds (1-{}). No automatic selection.",
                                  option_str, current_items.len());
-                        None // Set option to None - invalid selection
+                        None
                     }
                 }
             } else {
                 info!("AUTO_SELECT_OPTION not set. No automatic selection.");
-                None // Set option to None - no env var
+                None
             };
         }
         
@@ -397,14 +378,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         // For now, just continue the loop with old items
                     }
                 }
-                continue; // Go back to display new items
+                continue;
             } else {
                 // --- Play Selected Item ---
                 // Delegate playback to the central Player instance
                 info!("Selected item for playback: {} ({})", selected_item.name, selected_item.id);
                 cli.display_playback_status(&selected_item); // Show what's intended to play
 
-                // Send PlayNow command to the player task
                 let cmd = PlayerCommand::PlayNow { item_ids: vec![selected_item.id], start_index: 0 }; // Use struct variant
                 if let Err(e) = player_command_tx.send(cmd).await {
                     error!("Failed to send PlayNow command to player: {}", e);
@@ -420,7 +400,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tokio::select! {
                     _ = shutdown_rx_wait_playback.recv() => {
                          info!("Shutdown signal received during playback wait, exiting loop.");
-                         break 'main_loop; // Exit loop on Ctrl+C
+                         break 'main_loop;
                     }
                     // We don't wait for playback completion here, only Ctrl+C.
                     // The Player manages its own lifecycle.
@@ -434,7 +414,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tokio::select! {
                 _ = shutdown_rx_wait_idle.recv() => {
                      info!("Shutdown signal received while waiting, exiting loop.");
-                     break 'main_loop; // Exit loop on Ctrl+C
+                     break 'main_loop;
                 }
                 // No other branches, just wait for shutdown
             }
@@ -442,18 +422,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     
     // --- Shutdown ---
-    drop(_main_loop_span); // End main loop span
-    let _shutdown_span = tracing::info_span!("shutdown").entered(); // Start shutdown span
+    drop(_main_loop_span);
+    let _shutdown_span = tracing::info_span!("shutdown").entered();
     info!("Main loop exited. Initiating graceful shutdown...");
 
     // --- Player Shutdown ---
-    // Send shutdown command to the player task
     info!("Sending shutdown command to player task...");
     if let Err(e) = player_command_tx.send(PlayerCommand::Shutdown).await {
         error!("Failed to send shutdown command to player: {}", e);
     }
 
-    // Wait for the player task to finish
     info!("Waiting for player task to finish...");
     if let Err(e) = player_task_handle.await {
         error!("Error waiting for player task: {:?}", e);
@@ -478,7 +456,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Raw mode should have been disabled by the Ctrl+C handler or if the loop exited normally.
     // No explicit call needed here unless another exit path exists that doesn't trigger the handler.
-    drop(_shutdown_span); // End shutdown span
+    drop(_shutdown_span);
     Ok(())
 }
 

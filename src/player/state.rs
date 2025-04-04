@@ -1,4 +1,3 @@
-// src/player/state.rs
 use crate::jellyfin::models::MediaItem;
 use tokio::sync::oneshot;
 
@@ -12,7 +11,7 @@ pub enum PlayerCommand {
     Next,
     Previous,
     GetFullState(oneshot::Sender<InternalPlayerState>),
-    TrackFinished, // Internal command
+    TrackFinished,
     Shutdown,
 }
 

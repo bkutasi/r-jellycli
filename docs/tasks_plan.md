@@ -6,7 +6,7 @@
 
 **Project Phase**: Core Functionality Implementation
 
-**Last Updated**: April 3, 2025 (Remote Control Implementation & Fixes)
+**Last Updated**: April 4, 2025 (Audio Refactoring Documentation)
 
 ## Priority Tasks
 
@@ -114,9 +114,10 @@
 
 10. **Core Component Refactoring**
    - Refactored `jellyfin::websocket`, `jellyfin::api`, and `audio::playback` modules.
-   - Extracted `ws_incoming_handler.rs` from `websocket.rs`.
-   - Decomposed `playback.rs` into multiple sub-modules (`decoder.rs`, `alsa_handler.rs`, etc.).
+   - Extracted `ws_incoming_handler.rs` from `jellyfin/websocket.rs`.
+   - Decomposed `src/audio/playback.rs` into smaller modules (`alsa_writer.rs`, `processor.rs`, `state_manager.rs`, `loop_runner.rs`, etc.).
    - Improved modularity, maintainability, and logging.
+   - Fixed associated build errors and runtime playback issues (e.g., premature task termination) discovered during refactoring.
    - Status: Completed
 
 12. **Jellyfin Remote Control Command Handling & Fixes**

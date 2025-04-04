@@ -26,6 +26,9 @@
   - Graceful shutdown via Ctrl+C and remote `Stop` command.
   - Core components (`audio`, `jellyfin`) refactored for better modularity and maintainability.
 
+- ✅ **Audio Subsystem Refactoring & Bug Fixes**
+  - Refactored `src/audio/playback.rs` into smaller, more focused modules (`alsa_writer.rs`, `processor.rs`, `state_manager.rs`, `loop_runner.rs`) for improved maintainability.
+  - Resolved build errors and runtime playback issues (e.g., premature task termination) identified during refactoring.
 **Current State Summary**:
 - Core audio playback is functional.
 - Remote control commands `PlayNow` and `Stop` are implemented and working correctly.

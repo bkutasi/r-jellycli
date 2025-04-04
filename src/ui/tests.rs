@@ -7,20 +7,15 @@ mod tests {
     
     
     
-    // Test command-line argument parsing
     #[test]
     fn test_args_parsing() {
-        // This test uses clap's built-in testing functionality
         use clap::CommandFactory;
         let app = Args::command();
         app.debug_assert();
     }
     
-    // Test that default values are set correctly
     #[test]
     fn test_args_defaults() {
-        // Note: We can't easily test Args::parse() directly as it reads from env/args
-        // But we can test the defaults in the definition
         let args = Args {
             server_url: None,
             api_key: None,
@@ -38,7 +33,6 @@ mod tests {
         assert!(args.config.is_none());
     }
     
-    // Test displaying media items
     #[test]
     fn test_display_items() {
         let cli = Cli {
@@ -73,14 +67,10 @@ mod tests {
             },
         ];
         
-        // This test confirms the function doesn't panic when displaying items
         cli.display_items(&items);
         
-        // In a more sophisticated test setup, we could capture stdout
-        // and verify the exact output format
     }
     
-    // Test error display
     #[test]
     fn test_display_error() {
         let cli = Cli {
@@ -95,12 +85,7 @@ mod tests {
         };
         
         let error = std::io::Error::new(std::io::ErrorKind::Other, "Test error");
-        // This just verifies the function doesn't panic
         cli.display_error(&error);
     }
     
-    // Additional tests that would be useful but require more complex test setup:
-    // - test_select_item: This would require mocking stdin
-    // - test_get_credentials: This would require mocking stdin
-    // - test_display_playback_status: Straightforward but needs output capture
 }

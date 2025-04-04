@@ -86,8 +86,6 @@ impl Cli {
         let password = match &self.args.password {
             Some(p) => p.clone(),
             None => {
-                // Note: In a real application, you would use a crate like rpassword
-                // for secure password input, but for simplicity we're using regular stdin
                 print!("Enter Jellyfin password: ");
                 io::stdout().flush()?;
                 let mut input = String::new();

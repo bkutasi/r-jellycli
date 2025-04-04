@@ -107,7 +107,6 @@ impl AlsaPcmHandler {
             let buffer_size = hwp.get_buffer_size()?;
             let period_size = hwp.get_period_size()?;
             swp.set_start_threshold(buffer_size - period_size)?;
-            // swp.set_avail_min(period_size)?; // Consider for lower latency
             pcm.sw_params(&swp)?;
             debug!(target: LOG_TARGET, "ALSA software parameters applied (buffer={}, period={}).", buffer_size, period_size);
         }

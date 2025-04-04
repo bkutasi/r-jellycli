@@ -3,8 +3,7 @@ use tracing::{debug, error, info, trace, warn}; // Replaced log with tracing
 use tracing::instrument;
 use std::io;
 use symphonia::core::audio::AudioBufferRef;
-// Removed unused Signal import
-use symphonia::core::audio::{SignalSpec, AudioBuffer}; // Removed unused AudioBufferRef
+use symphonia::core::audio::{SignalSpec, AudioBuffer};
 use symphonia::core::sample::i24; // Import the i24 type
 use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -13,11 +12,19 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::TimeBase;
-// Removed unused TypeId import
 use tokio::sync::broadcast;
-use tokio::task; // Restore task import
+use tokio::task;
 
 const LOG_TARGET: &str = "r_jellycli::audio::decoder";
+
+/// Represents the outcome of trying to read the next packet.
+// Removed #[derive(Debug)] because symphonia::core::formats::Packet doesn't implement Debug
+enum PacketReadOutcome {
+    Packet(Packet),
+    EndOfStream,
+    ShutdownSignalReceived,
+}
+
 
 /// Manages Symphonia format reading and decoding.
 pub struct SymphoniaDecoder {
@@ -29,7 +36,6 @@ pub struct SymphoniaDecoder {
     sample_format: Option<symphonia::core::sample::SampleFormat>, // Added field
 }
 
-// Removed old DecodeResult enum
 
 /// Represents the result of a decode operation returning a buffer reference.
 /// Need to manage lifetime carefully, potentially requiring HRTBs or making the buffer owned.
@@ -37,22 +43,6 @@ pub struct SymphoniaDecoder {
 /// Let's try returning an owned buffer representing the ref for now.
 pub enum DecodeRefResult {
     /// Successfully decoded audio data. Contains owned buffer and timestamp.
-    // Removed problematic Decoded variant as Sample is not object-safe
-    // Let's try returning the AudioBufferRef directly and deal with lifetimes later if needed.
-    // Decoded((AudioBufferRef<'static>, u64)), // This lifetime is likely wrong.
-    // Let's stick to the original plan: return AudioBufferRef and let playback.rs handle conversion.
-    // We need a lifetime parameter.
-    // pub enum DecodeRefResult<'a> { Decoded((AudioBufferRef<'a>, u64)), ... }
-    // This complicates the async function signature.
-    // Alternative: Return an enum that holds different owned buffer types?
-    // Let's try modifying DecodeResult itself for now to hold AudioBufferRef temporarily.
-    // This is messy. Let's create DecodeRefResult but return owned data for now.
-    // How about returning the raw packet data? No, that defeats the purpose.
-    // Let's go back to the idea of decode_next_ref returning AudioBufferRef.
-    // The lifetime issue is tricky in async.
-    // Maybe the simplest is to modify decode_next_frame to return Result<Option<(AudioBufferRef<'decoder_lifetime>, u64)>, AudioError>
-    // where 'decoder_lifetime is the lifetime of the decoder instance?
-    // Let's define DecodeRefResult without lifetimes for now and see where it breaks.
 
     // Decoded((AudioBufferRef<'?>, u64)), // Placeholder lifetime
     // Let's try returning an enum payload that owns the data
@@ -69,7 +59,7 @@ pub enum DecodeRefResult {
 pub enum DecodedBufferAndTimestamp {
     U8(AudioBuffer<u8>, u64),
     S16(AudioBuffer<i16>, u64),
-    S24(AudioBuffer<i24>, u64), // Use the correct i24 type
+    S24(AudioBuffer<i24>, u64),
     S32(AudioBuffer<i32>, u64),
     F32(AudioBuffer<f32>, u64),
     F64(AudioBuffer<f64>, u64),
@@ -79,7 +69,7 @@ pub enum DecodedBufferAndTimestamp {
 impl SymphoniaDecoder {
     /// Creates and initializes a new Symphonia decoder from a media source stream.
     #[instrument(skip(mss), target = LOG_TARGET)] // Instrument the constructor, skip complex mss
-    pub fn new(mss: MediaSourceStream) -> Result<Self, AudioError> { // Restore signature
+    pub fn new(mss: MediaSourceStream) -> Result<Self, AudioError> {
         debug!(target: LOG_TARGET, "Setting up Symphonia format reader and decoder...");
         let hint = Hint::new();
         let meta_opts: MetadataOptions = Default::default();
@@ -94,8 +84,8 @@ impl SymphoniaDecoder {
             .tracks()
             .iter()
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL) // Find first playable track
-            .ok_or(AudioError::UnsupportedFormat("No suitable audio track found".to_string()))?
-            .clone(); // Clone track info
+            .ok_or(AudioError::UnsupportedFormat("No suitable audio track found".to_string()))? // Find first playable track
+            .clone();
 
         debug!(target: LOG_TARGET, "Found suitable audio track: ID={}, Codec={:?}", track.id, track.codec_params.codec);
 
@@ -111,8 +101,7 @@ impl SymphoniaDecoder {
         let initial_spec = SignalSpec::new(
             track.codec_params.sample_rate.ok_or(AudioError::MissingCodecParams("sample rate"))?,
             track.codec_params.channels.ok_or(AudioError::MissingCodecParams("channels map"))?,
-        );
-        // Store the sample format
+        ); // Store the initial signal specification.
         let sample_format = track.codec_params.sample_format;
 
         debug!(target: LOG_TARGET, "Symphonia decoder created successfully. Initial Spec: {:?}, Sample Format: {:?}", initial_spec, sample_format);
@@ -122,8 +111,8 @@ impl SymphoniaDecoder {
             decoder: Some(decoder),
             track_id: track.id,
             track_time_base: track.codec_params.time_base,
-            initial_spec: Some(initial_spec), // Correct indentation
-            sample_format, // Correct indentation
+            initial_spec: Some(initial_spec),
+            sample_format,
         }) // End Ok(Self { ... })
     }
 
@@ -148,15 +137,14 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
         mut format_reader: Box<dyn FormatReader>,
         decoder: Box<dyn Decoder>, // Pass decoder through to maintain ownership chain (removed mut)
         shutdown_rx: &mut broadcast::Receiver<()>,
-    // Restore original return type including reader/decoder
-    ) -> Result<(Box<dyn FormatReader>, Box<dyn Decoder>, Option<Packet>), AudioError> {
+    ) -> Result<(Box<dyn FormatReader>, Box<dyn Decoder>, PacketReadOutcome), AudioError> {
         trace!(target: LOG_TARGET, "Entering read_next_packet");
         // Check for shutdown *before* potentially moving reader/decoder
         match shutdown_rx.try_recv() {
             Ok(_) => {
                 info!(target: LOG_TARGET, "Shutdown signal received before reading packet.");
                 // Return reader/decoder along with None packet to signal shutdown
-                return Ok((format_reader, decoder, None));
+                return Ok((format_reader, decoder, PacketReadOutcome::ShutdownSignalReceived));
             }
             Err(broadcast::error::TryRecvError::Empty) => {
                 // No shutdown signal yet, proceed
@@ -168,13 +156,13 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
             Err(broadcast::error::TryRecvError::Closed) => {
                  info!(target: LOG_TARGET, "Shutdown channel closed.");
                  // Return reader/decoder along with None packet to signal channel closed
-                 return Ok((format_reader, decoder, None));
+                 return Ok((format_reader, decoder, PacketReadOutcome::ShutdownSignalReceived));
             }
         }
 
-        // Restore spawn_blocking for the synchronous next_packet call
-        trace!(target: LOG_TARGET, "read_next_packet: Spawning blocking task for next_packet...");
-        let blocking_result = task::spawn_blocking(move || {
+        trace!(target: LOG_TARGET, "read_next_packet: Creating blocking task future for next_packet...");
+        // Create the future but don't await it yet
+        let mut read_future = task::spawn_blocking(move || {
             // Move reader and decoder into the blocking task
             trace!(target: LOG_TARGET, "[SpawnBlocking] Calling format_reader.next_packet()...");
             let packet_res = format_reader.next_packet();
@@ -190,23 +178,38 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
             }
             // Return ownership along with the result
             (format_reader, decoder, packet_res)
-        }).await;
+        });
+
+        trace!(target: LOG_TARGET, "read_next_packet: Selecting between read_future and shutdown_rx...");
+        let blocking_result = tokio::select! {
+            biased; // Prioritize shutdown check
+            _ = shutdown_rx.recv() => {
+                info!(target: LOG_TARGET, "Shutdown signal received during packet read wait.");
+                // Abort the read future
+                read_future.abort();
+                // Indicate shutdown by returning a specific error. Ownership is lost.
+                return Err(AudioError::ShutdownRequested);
+            }
+            join_result = &mut read_future => { // Poll by mutable reference
+                trace!(target: LOG_TARGET, "read_next_packet: Read future completed.");
+                join_result // This is Result<(Box<dyn FormatReader>, Box<dyn Decoder>, Result<Packet, SymphoniaError>), JoinError>
+            }
+        };
         trace!(target: LOG_TARGET, "read_next_packet: Blocking task completed.");
 
         trace!(target: LOG_TARGET, "read_next_packet: Spawn blocking result is_ok: {}", blocking_result.is_ok());
         match blocking_result {
             Ok((ret_reader, ret_decoder, Ok(packet))) => {
-                // trace!(target: LOG_TARGET, "Read packet: track={}, ts={}, duration={}", packet.track_id(), packet.ts(), packet.dur());
                 // Return the reader/decoder received from the closure along with the packet
-                Ok((ret_reader, ret_decoder, Some(packet)))
+                Ok((ret_reader, ret_decoder, PacketReadOutcome::Packet(packet)))
             },
             Ok((ret_reader, ret_decoder, Err(e))) => { // Return reader/decoder even on error
                 // Check if the error indicates end of stream
                 if matches!(e, symphonia::core::errors::Error::IoError(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof) {
                      debug!(target: LOG_TARGET, "End of stream reached.");
                      // Return the reader/decoder received from the closure, with None packet
-                     trace!(target: LOG_TARGET, "Returning Ok(None) for EOF from read_next_packet");
-                     Ok((ret_reader, ret_decoder, None))
+                     trace!(target: LOG_TARGET, "Returning Ok(EndOfStream) for EOF from read_next_packet");
+                     Ok((ret_reader, ret_decoder, PacketReadOutcome::EndOfStream))
                 } else {
                      // Log the specific error variant for debugging
                      error!(target: LOG_TARGET, "Error reading next packet (not EOF): {:?}", e);
@@ -217,21 +220,21 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
                      Err(AudioError::SymphoniaError(e))
                 }
             },
-            Err(join_error) => { // Restore JoinError handling
+            Err(join_error) => {
                  // Task failed, reader/decoder ownership is lost
                  error!(target: LOG_TARGET, "Spawn blocking task for next_packet failed: {}", join_error);
                  Err(AudioError::TaskJoinError(join_error.to_string()))
             }
-        } // End match blocking_result
-    } // End fn read_next_packet
+        }
+    }
 
     /// Decodes the next available audio frame, returning an owned buffer variant.
     /// Handles reading packets, decoding, and potential errors or stream end.
     #[instrument(skip(self, shutdown_rx), target = LOG_TARGET)] // Instrument the main decode function
-    pub async fn decode_next_frame_owned( // Renamed function
+    pub async fn decode_next_frame_owned(
         &mut self,
         shutdown_rx: &mut broadcast::Receiver<()>,
-    ) -> Result<DecodeRefResult, AudioError> { // Return new enum type
+    ) -> Result<DecodeRefResult, AudioError> {
         // Take ownership of reader and decoder temporarily
         let mut format_reader = self.format_reader.take().ok_or(AudioError::InvalidState("Format reader not available".to_string()))?;
         let mut decoder = self.decoder.take().ok_or(AudioError::InvalidState("Decoder not available".to_string()))?;
@@ -243,18 +246,28 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
         loop {
             // --- Read Next Packet ---
             let read_result = Self::read_next_packet(format_reader, decoder, shutdown_rx).await;
-            let packet_opt: Option<Packet>;
+            let packet_outcome: PacketReadOutcome;
 
             match read_result {
                 // Success: Regain ownership of potentially updated reader/decoder
-                Ok((new_format_reader, new_decoder, opt_packet)) => {
+                Ok((new_format_reader, new_decoder, outcome)) => {
                     format_reader = new_format_reader; // Update local ownership with returned values
                     decoder = new_decoder;             // Update local ownership with returned values
-                    packet_opt = opt_packet;
+                    packet_outcome = outcome;
                 }
-                 // Error: Ownership is lost within read_next_packet. Propagate the error.
-                 // Do NOT try to restore self.format_reader/self.decoder here.
+                // Error: Ownership is lost within read_next_packet. Propagate the error.
+                // Do NOT try to restore self.format_reader/self.decoder here.
                 Err(e) => {
+                    // Check specifically for ShutdownRequested first
+                    if matches!(e, AudioError::ShutdownRequested) {
+                        info!(target: LOG_TARGET, "Shutdown requested during packet read. Decoder state lost.");
+                        // Ownership was already lost in read_next_packet, ensure fields are None
+                        self.format_reader = None;
+                        self.decoder = None;
+                        trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning DecodeRefResult::Shutdown (from read_next_packet)");
+                        return Ok(DecodeRefResult::Shutdown);
+                    }
+
                     error!(target: LOG_TARGET, "Failed to read next packet, decoder state potentially lost: {}", e);
                     // Handle specific IO errors that indicate end-of-stream gracefully
                     if let AudioError::SymphoniaError(SymphoniaError::IoError(ref io_err)) = e {
@@ -286,29 +299,24 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
                 }
             }
 
-            // Check if shutdown occurred during read or if packet is None (EOF)
-            let packet = match packet_opt {
-                Some(p) => p,
-
-                None => {
-                    info!(target: LOG_TARGET, "No more packets or shutdown signal received.");
-                    // Restore ownership before returning EndOfStream or Shutdown
+            // Handle the outcome from read_next_packet
+            let packet = match packet_outcome {
+                PacketReadOutcome::Packet(p) => p, // Got a packet, proceed to decode
+                PacketReadOutcome::EndOfStream => {
+                    info!(target: LOG_TARGET, "End of stream detected by read_next_packet.");
+                    // Restore ownership before returning EndOfStream
                     self.format_reader = Some(format_reader);
                     self.decoder = Some(decoder);
-                    // Determine if it was EOF or shutdown
-                    // We check the receiver again, though it might have been consumed already.
-                    // A more robust way might involve passing the shutdown status explicitly.
-                    // Determine if it was EOF or shutdown based on shutdown_rx state and return directly
-                    return match shutdown_rx.try_recv() {
-                        Err(broadcast::error::TryRecvError::Empty) => {
-                            trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning DecodeRefResult::EndOfStream (No packet/EOF)");
-                            Ok(DecodeRefResult::EndOfStream)
-                        },
-                        _ => { // Covers Ok(_), Err(Lagged), Err(Closed) -> treat as shutdown
-                            trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning DecodeRefResult::Shutdown (Signal received or channel closed)");
-                            Ok(DecodeRefResult::Shutdown)
-                        }
-                    };
+                    trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning DecodeRefResult::EndOfStream");
+                    return Ok(DecodeRefResult::EndOfStream);
+                }
+                PacketReadOutcome::ShutdownSignalReceived => {
+                    info!(target: LOG_TARGET, "Shutdown signal detected by read_next_packet.");
+                    // Restore ownership before returning Shutdown
+                    self.format_reader = Some(format_reader);
+                    self.decoder = Some(decoder);
+                    trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning DecodeRefResult::Shutdown");
+                    return Ok(DecodeRefResult::Shutdown);
                 }
             };
 
@@ -323,7 +331,7 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
             // Clone packet data as it needs to move into the blocking task
             // Need to clone the packet itself, not just data, if decode needs metadata
             let packet_clone = packet.clone(); // Clone the whole packet
-            let mut decode_future = task::spawn_blocking(move || { // Add mut here
+            let mut decode_future = task::spawn_blocking(move || {
                 // Move decoder into the blocking task
                 let decode_result = decoder.decode(&packet_clone);
 
@@ -418,7 +426,7 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
                     return Err(e.into()); // Convert SymphoniaError to AudioError
                 }
             }
-        } // end loop
+        }
     }
 
     /// Resets the decoder state, potentially useful for seeking or error recovery.
@@ -432,6 +440,4 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
         // which is complex and not implemented here. This reset is only for the decoder part.
     }
 
-    // Removed the generic try_convert_buffer function as conversion is now handled
-    // by returning an enum variant from decode_next_frame_owned.
 }

@@ -68,23 +68,27 @@ graph TD
   - **Note**: Playback state reporting (`PlaybackStart`, `PlaybackStopped`, `ReportPlaybackProgress`) is now handled via direct HTTP POST requests to the server, not WebSocket messages.
 
 #### 3. Player Orchestrator & Playback Engine (`player` and `audio` modules)
-- **Responsibility**: Manages the overall playback lifecycle, coordinates audio output, and reports state back to the Jellyfin server.
+- **Responsibility**: Manages the overall playback lifecycle (`player` module), coordinates audio decoding, processing, and output (`audio` module), and reports state back to the Jellyfin server.
 - **Implementation**:
-    - **`Player` (`src/player.rs`)**: Central orchestrator. Spawns and manages background tasks for audio playback and progress reporting. Communicates state changes directly to the Jellyfin server via HTTP POST requests. Uses broadcast channels for task shutdown. Includes an `async fn shutdown()` for graceful cleanup.
-    - **`AlsaPlayer` (`src/audio/playback.rs`)**: Orchestrates audio playback using ALSA. It coordinates several sub-modules within `src/audio/`:
+    - **`Player` (`src/player/mod.rs` & submodules)**: Central orchestrator. Spawns and manages background tasks for audio playback (`audio_task_manager.rs`), item fetching (`item_fetcher.rs`), command handling (`command_handler.rs`), and progress reporting (`reporter.rs` in `jellyfin` module). Communicates state changes directly to the Jellyfin server via HTTP POST requests. Uses broadcast channels for task shutdown.
+    - **Audio Subsystem (`src/audio/mod.rs` & submodules)**: Handles the specifics of audio playback. Refactored from a monolithic `playback.rs` into:
+        - `playback.rs`: Simplified entry point or coordinator for the audio subsystem.
+        - `loop_runner.rs`: Manages the main audio processing loop task.
+        - `processor.rs`: Contains the core logic for fetching decoded data, processing it (e.g., format conversion), and sending it to the writer.
+        - `alsa_writer.rs`: Handles writing processed audio samples to the ALSA device via `alsa_handler.rs`.
+        - `state_manager.rs`: Manages shared playback state (e.g., playing/paused, progress).
         - `decoder.rs`: Handles stream decoding using Symphonia.
-        - `alsa_handler.rs`: Manages interaction with the ALSA PCM device.
-        - `stream_wrapper.rs`: Wraps the HTTP stream for decoding.
+        - `alsa_handler.rs`: Low-level interaction with the ALSA PCM device.
         - `format_converter.rs`: Converts audio samples if needed.
-        - `progress.rs`: Manages playback progress tracking (`PlaybackProgressInfo`).
+        - `sample_converter.rs`: Utility for sample format conversions.
+        - `progress.rs`: Manages playback progress tracking (`PlaybackProgressInfo`), likely used by `state_manager.rs`.
         - `error.rs`: Defines audio-specific errors (`AudioError`).
-    - Reports current playback time via shared state defined in `progress.rs`.
 - **Key Features**:
   - Asynchronous task management for playback and progress reporting.
-  - Decoupled state communication using channels and shared memory.
+  - Decoupled state communication using channels and shared memory (e.g., via `state_manager.rs`).
   - ALSA device setup and configuration.
   - Audio stream decoding and processing.
-  - Playback lifecycle management (Start, Stop implemented; Pause, Seek, Volume TODO).
+  - Playback lifecycle management (Start, Stop, Pause, Seek - check `player` module for current status).
   - Periodic progress reporting to Jellyfin server via HTTP POST requests.
 
 #### 4. Configuration Management (`config` module)
@@ -157,9 +161,9 @@ graph TD
     - Handles authentication state and session management.
     - Methods for retrieving media items, streaming URLs, sending commands.
 
-2.  **AlsaPlayer / Playback Engine (`src/audio/playback.rs` and sub-modules)**
-    - Provides methods for audio playback control (start, stop).
-    - Orchestrates device initialization (`alsa_handler.rs`), streaming (`stream_wrapper.rs`), decoding (`decoder.rs`), and manages playback state and progress (`progress.rs`).
+2.  **Audio Subsystem (`src/audio/` modules)**
+    - Provides an interface (likely via `src/audio/playback.rs` or a dedicated control structure) for the `Player` orchestrator to control playback (start, stop, pause, seek).
+    - Internally manages ALSA interaction (`alsa_writer.rs`, `alsa_handler.rs`), audio processing (`processor.rs`), state (`state_manager.rs`), and the core loop (`loop_runner.rs`).
 
 3.  **Settings**
     - Manages configuration state.

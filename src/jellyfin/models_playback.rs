@@ -10,7 +10,7 @@ use std::collections::HashMap;
 #[serde(rename_all = "PascalCase")]
 pub struct QueueItem {
     pub id: String,
-    pub playlist_item_id: String, // Typically "playlistItem{index}"
+    pub playlist_item_id: String,
 }
 
 /// Base structure for playback reporting (Start, Progress, Stop).
@@ -21,16 +21,16 @@ pub struct PlaybackReportBase {
     pub queueable_media_types: Vec<String>, // e.g., ["Audio"]
     pub can_seek: bool,
     pub item_id: String,
-    pub media_source_id: String, // Often same as item_id
+    pub media_source_id: String,
     pub position_ticks: i64,
     pub volume_level: i32,
     pub is_paused: bool,
     pub is_muted: bool,
     pub play_method: String, // e.g., "DirectPlay"
     pub play_session_id: String,
-    pub live_stream_id: Option<String>, // Go uses "", map to None or Some("")? Let's use Option<String>
+    pub live_stream_id: Option<String>,
     pub playlist_length: i64, // Seems to be item duration in Go code
-    pub playlist_index: Option<i32>, // Added based on observation, might be needed
+    pub playlist_index: Option<i32>,
     pub shuffle_mode: String, // "Shuffle" or "Sorted"
     pub now_playing_queue: Vec<QueueItem>,
 }
@@ -59,8 +59,6 @@ pub struct PlaybackStopReport {
 pub struct PlaybackProgressReport {
      #[serde(flatten)]
     pub base: PlaybackReportBase,
-    // Note: Go includes an 'Event' field here, but it seems redundant as the endpoint defines the event.
-    // We omit it unless testing shows it's required by the server.
 }
 
 /// Full payload for reporting playback start via POST /Sessions/Playing.
@@ -82,16 +80,11 @@ pub struct PlaybackStateInfo {
     pub position_ticks: i64,
     pub duration_ticks: i64, // Item duration
     pub is_paused: bool,
-    // pub is_muted: bool, // Removed
-    // pub volume_level: i32, // Removed
     pub is_shuffle: bool,
-    pub queue_ids: Vec<String>, // Just the IDs for easier handling
+    pub queue_ids: Vec<String>,
     pub current_queue_index: Option<usize>, // Index within queue_ids
-    // Add other relevant state fields as needed
 }
 
-// Removed old PlaybackStartInfo struct and its impl
-// Removed old PlaybackStopInfo struct and its impl
 
 
 // --- Incoming WebSocket Command Structures ---
@@ -110,9 +103,8 @@ pub struct GeneralCommand {
 pub struct PlayStateCommand {
     #[serde(rename = "Command")]
     pub command: String,
-    // Arguments might be needed for Seek, etc.
     #[serde(rename = "ControllingUserId")]
-    pub controlling_user_id: Option<String>, // Added based on potential Jellyfin structure
+    pub controlling_user_id: Option<String>,
 }
 
 /// Represents a command to initiate playback received via WebSocket (e.g., PlayNow).
@@ -124,7 +116,4 @@ pub struct PlayCommand {
     pub item_ids: Vec<String>,
     #[serde(rename = "StartIndex")]
     pub start_index: Option<i32>,
-    // Add other potential fields if needed based on Jellyfin API
-    // #[serde(rename = "StartPositionTicks")] // Removed seek-related field
-    // pub start_position_ticks: Option<i64>,
 }
