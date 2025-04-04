@@ -1,105 +1,82 @@
 //! Handles processing of specific incoming WebSocket messages from the Jellyfin server.
 
-use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex}; // Add broadcast
-use tracing::{debug, error, info, warn}; // Replaced log with tracing
-use tracing::instrument;
+// Removed unused JellyfinApiContract import
+use tokio::sync::mpsc;
+use tracing::{debug, error, warn, instrument}; // Removed unused info
 
-use crate::jellyfin::api::JellyfinClient;
-use crate::jellyfin::models::MediaItem;
-use crate::player::Player;
+// Import the internal Player command enum
+use crate::player::PlayerCommand;
+// Import the Jellyfin WS command structs
+use super::models_playback::{GeneralCommand, PlayCommand, PlayStateCommand};
+// Removed unused MediaItem import
+// Removed unused import: use crate::jellyfin::api::JellyfinClient;
+// Removed unused import: use std::sync::Arc;
+// Removed unused import: use tokio::sync::Mutex;
+// Removed unused import: use crate::player::Player;
 
-use super::models_playback::{GeneralCommand, PlayCommand, PlayStateCommand}; // Use specific types
-
-/// Handles "GeneralCommand" messages like SetVolume, ToggleMute.
-#[instrument(skip(_player), fields(command_name = %command.name))]
+/// Handles "GeneralCommand" messages like SetVolume, SetMute.
+#[instrument(skip(command_tx), fields(command_name = %command.name))]
 pub(super) async fn handle_general_command(
     command: GeneralCommand,
-    _player: Arc<Mutex<Player>>,
+    command_tx: &mpsc::Sender<PlayerCommand>,
 ) {
     debug!("[WS Incoming] Handling GeneralCommand: {}", command.name);
 
-    match command.name.as_str() {
-        // Removed SetVolume handler
-        // Removed ToggleMute handler
+    let player_command = match command.name.as_str() {
+        // "SetVolume" removed
+        // "SetMute" removed
         // Add other general commands if needed (e.g., SetAudioStreamIndex, SetSubtitleStreamIndex)
         _ => {
             warn!("[WS Incoming] Unhandled GeneralCommand name: {}", command.name);
+            None
+        }
+    };
+
+    if let Some(cmd) = player_command {
+        if let Err(e) = command_tx.send(cmd).await {
+            error!("[WS Incoming] Failed to send GeneralCommand to player task: {}", e);
         }
     }
 }
 
-/// Handles "PlayState" messages like PlayPause, NextTrack, Stop.
-#[instrument(skip(player), fields(command_name = %command.command))]
+/// Handles "PlayState" messages like PlayPause, NextTrack, Stop, Seek.
+#[instrument(skip(command_tx), fields(command_name = %command.command))]
 pub(super) async fn handle_playstate_command(
     command: PlayStateCommand,
-    player: Arc<Mutex<Player>>,
-    shutdown_tx: &broadcast::Sender<()>, // Add shutdown sender parameter
+    command_tx: &mpsc::Sender<PlayerCommand>,
 ) {
     debug!("[WS Incoming] Handling PlayState command: {}", command.command);
 
-    // Lock is acquired and dropped within each match arm to avoid holding across awaits
-    match command.command.as_str() {
-        "PlayPause" => {
-            debug!("[WS Incoming] PlayPause");
-            let mut player_guard = player.lock().await;
-            player_guard.play_pause().await;
-        }
-        "NextTrack" => {
-            debug!("[WS Incoming] NextTrack");
-            let mut player_guard = player.lock().await;
-            player_guard.next().await;
-        }
-        "PreviousTrack" => {
-            debug!("[WS Incoming] PreviousTrack");
-            let mut player_guard = player.lock().await;
-            player_guard.previous().await;
-        }
-        "Pause" => {
-            debug!("[WS Incoming] Pause");
-            let mut player_guard = player.lock().await;
-            player_guard.pause().await;
-        }
-        "Unpause" => {
-            debug!("[WS Incoming] Unpause / Resume");
-            let mut player_guard = player.lock().await;
-            player_guard.resume().await;
-        }
-        "Stop" | "StopMedia" => { // Handle both potential names
-            info!("[WS Incoming] Stop command received. Stopping playback and clearing queue.");
-            let mut player_guard = player.lock().await;
-            player_guard.stop().await; // Stop playback first
-            player_guard.clear_queue().await; // Then clear the queue
-        
-            // Send shutdown signal
-            info!("[WS Incoming] Sending shutdown signal after Stop command.");
-            if let Err(e) = shutdown_tx.send(()) {
-                error!("[WS Incoming] Failed to send shutdown signal: {}", e);
-                // Log error, but don't prevent the rest of the stop logic
-            }
-        }
-        "Seek" => {
-            if let Some(ticks) = command.seek_position_ticks {
-                debug!("[WS Incoming] Seek to {} ticks", ticks);
-                let mut player_guard = player.lock().await;
-                // Assuming Player::seek takes ticks directly
-                player_guard.seek(ticks).await;
-            } else {
-                warn!("[WS Incoming] Seek command received without SeekPositionTicks.");
-            }
-        }
+    let player_command = match command.command.as_str() {
+        "PlayPause" => Some(PlayerCommand::PlayPauseToggle),
+        "NextTrack" => Some(PlayerCommand::Next),
+        "PreviousTrack" => Some(PlayerCommand::Previous),
+        // Explicit Pause/Unpause might need specific PlayerCommands if toggle isn't sufficient,
+        // but for now, map them to the toggle.
+        "Pause" => Some(PlayerCommand::PlayPauseToggle), // Or a specific Pause command if needed
+        "Unpause" => Some(PlayerCommand::PlayPauseToggle), // Or a specific Resume command if needed
+        // "Stop" / "StopMedia" removed - Stop is now implicit via other actions
+        // "Seek" was never handled here, ensuring it remains unhandled.
         _ => {
             warn!("[WS Incoming] Unhandled PlayState command: {}", command.command);
+            None
+        }
+    };
+
+    if let Some(cmd) = player_command {
+        if let Err(e) = command_tx.send(cmd).await {
+            error!("[WS Incoming] Failed to send PlayStateCommand to player task: {}", e);
         }
     }
 }
 
 /// Handles "Play" messages to start or queue playback.
-#[instrument(skip(player, jellyfin_client), fields(command_name = %command.play_command, item_count = command.item_ids.len()))]
+/// Note: Item details are fetched by the Player task now.
+#[instrument(skip(command_tx), fields(command_name = %command.play_command, item_count = command.item_ids.len()))]
 pub(super) async fn handle_play_command(
     command: PlayCommand,
-    player: Arc<Mutex<Player>>,
-    jellyfin_client: &JellyfinClient, // Pass as reference
+    command_tx: &mpsc::Sender<PlayerCommand>,
+    // jellyfin_client argument removed as fetching is now done in Player task
 ) {
     debug!(
         "[WS Incoming] Handling Play command: '{}' with {} items, start index {}",
@@ -123,82 +100,30 @@ pub(super) async fn handle_play_command(
         return;
     }
 
-    // Fetch item details
-    info!(
-        "[WS Incoming] Fetching details for {} items for Play command...",
-        command.item_ids.len()
-    );
-    match jellyfin_client.get_items_details(&command.item_ids).await {
-        Ok(mut media_items) => {
-            info!(
-                "[WS Incoming] Successfully fetched details for {} items.",
-                media_items.len()
-            );
+    // Item fetching logic removed. Player task now handles fetching based on IDs.
 
-            // Ensure the order matches the request, as the API might not guarantee it.
-            // Create a map for quick lookup of original positions.
-            let original_order: std::collections::HashMap<&String, usize> = command
-                .item_ids
-                .iter()
-                .enumerate()
-                .map(|(i, id)| (id, i))
-                .collect();
-
-            media_items.sort_by_key(|item| *original_order.get(&item.id).unwrap_or(&usize::MAX));
-
-            // Apply start_index
-            let items_to_process: Vec<MediaItem> =
-                media_items.into_iter().skip(start_index).collect();
-
-            if items_to_process.is_empty() {
-                warn!(
-                    "[WS Incoming] No items left to process after applying start_index {}.",
-                    start_index
-                );
-                return;
-            }
-
-            debug!(
-                "[WS Incoming] Items to process ({}): {:?}",
-                items_to_process.len(),
-                items_to_process.iter().map(|i| i.id.clone()).collect::<Vec<_>>()
-            );
-
-            // Lock the player only when needed and drop the guard before awaits if possible,
-            // or ensure the lock is held only for the duration of the specific async call.
-            match command.play_command.as_str() {
-                "PlayNow" => {
-                    debug!("[WS Incoming] PlayNow: Stopping playback, clearing queue, and adding items.");
-                    // Lock -> Stop -> Clear -> Add -> Play -> Unlock (implicitly)
-                    let mut player_guard = player.lock().await;
-                    player_guard.stop().await; // Explicitly stop current playback first
-                    player_guard.clear_queue().await; // Clear queue state
-                    player_guard.add_items(items_to_process); // Add new items
-                    player_guard.play_from_start().await; // Start playing the new queue
-                }
-                "PlayNext" => {
-                    debug!("[WS Incoming] PlayNext: Inserting items at the beginning of the queue.");
-                    // Requires a Player method like `add_items_next`
-                    // let mut player_guard = player.lock().await;
-                    // player_guard.add_items_next(items_to_process); // Assuming sync
-                    warn!("[WS Incoming] PlayNext command received but not implemented in Player.");
-                }
-                "PlayLast" => {
-                    debug!("[WS Incoming] PlayLast: Appending items to the end of the queue.");
-                    let mut player_guard = player.lock().await;
-                    player_guard.add_items(items_to_process); // Assumes add_items appends (sync)
-                }
-                _ => {
-                    warn!(
-                        "[WS Incoming] Unhandled Play command type: {}",
-                        command.play_command
-                    );
-                }
-            }
+    // Translate to PlayerCommand and send
+    let player_command = match command.play_command.as_str() {
+        "PlayNow" => Some(PlayerCommand::PlayNow { item_ids: command.item_ids, start_index }),
+        "PlayNext" => {
+            // TODO: Implement PlayNext properly in the Player task.
+            // It might require inserting at index `current_index + 1`.
+            // For now, treat it like PlayLast (add to end).
+            warn!("[WS Incoming] PlayNext command received, treating as PlayLast (AddToQueue) for now.");
+            Some(PlayerCommand::AddToQueue { item_ids: command.item_ids })
         }
-        Err(e) => {
-            error!("[WS Incoming] Failed to fetch item details for Play command: {}", e);
-            // Consider sending feedback to the server if possible/necessary
+        "PlayLast" => Some(PlayerCommand::AddToQueue { item_ids: command.item_ids }),
+        _ => {
+            warn!("[WS Incoming] Unhandled Play command type: {}", command.play_command);
+            None
+        }
+    };
+
+    if let Some(cmd) = player_command {
+        if let Err(e) = command_tx.send(cmd).await {
+            error!("[WS Incoming] Failed to send PlayCommand to player task: {}", e);
         }
     }
 }
+
+

@@ -1,12 +1,12 @@
-use r_jellycli::audio::PlaybackOrchestrator; // Renamed from AlsaPlayer
-use tracing::{error, info, warn}; // Replaced log with tracing
-use tracing::instrument;
-use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt}; // Added for tracing setup
+// Removed PlaybackOrchestrator import, Player handles backend internally
+use tracing::{error, info, warn, instrument};
+use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use r_jellycli::config::Settings;
 use r_jellycli::jellyfin::JellyfinClient;
-use r_jellycli::player::Player;
+// Import new Player types
+use r_jellycli::player::{Player, PlayerCommand}; // Removed unused InternalPlayerStateUpdate
 use r_jellycli::ui::Cli;
-use tokio::sync::{broadcast, Mutex}; // Added Mutex
+use tokio::sync::{broadcast, mpsc}; // Removed Mutex import
 use r_jellycli::init_app_dirs;
 use std::error::Error;
 use std::path::Path;
@@ -21,33 +21,25 @@ use std::process;
 
 // TerminalCleanup struct removed. Cleanup is now handled explicitly in Ctrl+C handler.
 
-/// Sets up the core player components: PlaybackOrchestrator and Player.
-/// Configures the Player with the Jellyfin client and audio orchestrator.
+/// Creates the Player instance and its command sender channel.
 #[instrument(skip_all, name = "player_setup")]
-async fn setup_player_components(settings: &Settings, jellyfin_client: JellyfinClient) -> Arc<Mutex<Player>> {
-   info!("Setting up player components...");
+fn setup_player(settings: &Settings, jellyfin_client: JellyfinClient) -> (Player, mpsc::Sender<PlayerCommand>) {
+   info!("Setting up player instance...");
 
-   // Create PlaybackOrchestrator instance (needs device name from settings)
-   let playback_orchestrator = Arc::new(Mutex::new(PlaybackOrchestrator::new(&settings.alsa_device)));
-   info!("Created PlaybackOrchestrator for device: {}", settings.alsa_device);
+   // Define channel capacities (adjust as needed)
+   const STATE_UPDATE_CAPACITY: usize = 100;
+   const COMMAND_BUFFER_SIZE: usize = 50;
 
-   // Create the central Player state manager
-   let player = Arc::new(Mutex::new(Player::new()));
-   info!("Created central Player instance.");
+   // Create the Player instance using the new constructor
+   let (player, player_command_tx) = Player::new(
+       Arc::new(jellyfin_client), // Wrap client in Arc
+       settings.alsa_device.clone(),
+       STATE_UPDATE_CAPACITY,
+       COMMAND_BUFFER_SIZE,
+   );
+   info!("Created Player instance and command channel.");
 
-   // --- Configure Player Dependencies ---
-   { // Scope for player lock
-       let mut player_guard = player.lock().await;
-       player_guard.set_jellyfin_client(jellyfin_client); // Give Player access to the client
-       // Use the existing method name, which now accepts Arc<Mutex<PlaybackOrchestrator>>
-       player_guard.set_alsa_player(playback_orchestrator.clone()); // Give Player access to the audio player
-       // Set the ALSA device name on the Player instance
-       player_guard.set_alsa_device_name(settings.alsa_device.clone());
-       info!("Configured Player instance with JellyfinClient, PlaybackOrchestrator, and ALSA device name.");
-   }
-
-   info!("Player components setup complete.");
-   player // Return the configured player
+   (player, player_command_tx)
 }
 
 #[tokio::main]
@@ -258,9 +250,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     drop(_auth_span); // End auth span
 
-    // --- Setup Player Components ---
-    // Call the new async function to set up the player
-    let player = setup_player_components(&settings, jellyfin.clone()).await;
+    // --- Setup Player ---
+    // Create the player instance and its command sender channel
+    let (mut player, player_command_tx) = setup_player(&settings, jellyfin.clone());
+    // Subscribe to player state updates *before* starting the player task
+    let player_state_rx = player.subscribe_state_updates();
+    info!("Subscribed to player state updates.");
+
+    // --- Spawn Player Task ---
+    let player_task_handle = tokio::spawn(async move {
+        info!("Spawning player run loop task...");
+        player.run().await; // Run the player's command processing loop
+        info!("Player run loop task finished.");
+    });
 
     // --- Initialize Jellyfin Session and Link Player ---
     // This internally calls report_capabilities and starts WebSocket listener
@@ -274,20 +276,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         info!("Session initialized successfully (capabilities reported, WebSocket connected).");
 
-        // 2. Set the Player instance on the WebSocket handler
-        if let Err(e) = jellyfin.set_player(player.clone()).await {
-            warn!("Failed to link Player to WebSocket handler (handler might be missing if WS connection failed): {}", e);
+        // 2. Start the WebSocket listener task, passing the necessary channels
+        // Pass the command sender and state receiver to the listener
+        if let Err(e) = jellyfin.start_websocket_listener(
+            player_command_tx.clone(), // Pass command sender
+            player_state_rx,           // Pass state receiver
+            shutdown_tx.subscribe()    // Pass shutdown receiver
+        ).await {
+             error!("Failed to start WebSocket listener task: {}", e);
+             // This is likely a significant issue, consider if the app should exit.
         } else {
-            info!("Successfully linked Player to WebSocket handler.");
-
-            // 3. Start the WebSocket listener task
-            // Pass the broadcast receiver instead of the AtomicBool
-            if let Err(e) = jellyfin.start_websocket_listener(shutdown_tx.subscribe()).await {
-                 error!("Failed to start WebSocket listener task: {}", e);
-                 // This is likely a significant issue, consider if the app should exit.
-            } else {
-                 info!("WebSocket listener task started successfully.");
-            }
+             info!("WebSocket listener task started successfully.");
         }
         drop(_session_span); // End session span
     }
@@ -405,16 +404,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 info!("Selected item for playback: {} ({})", selected_item.name, selected_item.id);
                 cli.display_playback_status(&selected_item); // Show what's intended to play
 
-                // Lock the player and initiate playback
-                // This will internally handle fetching stream URL, starting tasks, and reporting state
-                let player_arc = player.clone(); // Clone Arc for the async block
-                tokio::spawn(async move {
-                    let mut player_guard = player_arc.lock().await;
-                    // Clear existing queue and play the selected item immediately
-                    player_guard.clear_queue().await;
-                    player_guard.add_items(vec![selected_item]); // Add the single selected item
-                    player_guard.play_from_start().await; // Start playback
-                });
+                // Send PlayNow command to the player task
+                let cmd = PlayerCommand::PlayNow { item_ids: vec![selected_item.id], start_index: 0 }; // Use struct variant
+                if let Err(e) = player_command_tx.send(cmd).await {
+                    error!("Failed to send PlayNow command to player: {}", e);
+                    // Handle error appropriately, maybe break loop or show message
+                } else {
+                    info!("Sent PlayNow command to player task.");
+                }
 
                 // After initiating playback, wait only for the shutdown signal (Ctrl+C)
                 // Keep eprintln for direct user instruction
@@ -450,25 +447,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Main loop exited. Initiating graceful shutdown...");
 
     // --- Player Shutdown ---
-    // Explicitly shut down the player first, which handles its own tasks and the audio orchestrator.
-    info!("Shutting down player components...");
-    { // Scope for player lock
-        let mut player_guard = player.lock().await;
-        player_guard.shutdown().await; // Call the new shutdown method
+    // Send shutdown command to the player task
+    info!("Sending shutdown command to player task...");
+    if let Err(e) = player_command_tx.send(PlayerCommand::Shutdown).await {
+        error!("Failed to send shutdown command to player: {}", e);
     }
-    info!("Player components shut down.");
 
+    // Wait for the player task to finish
+    info!("Waiting for player task to finish...");
+    if let Err(e) = player_task_handle.await {
+        error!("Error waiting for player task: {:?}", e);
+    } else {
+        info!("Player task finished.");
+    }
     // --- WebSocket Listener Shutdown ---
-    // Now wait for the WebSocket listener task (if it was started)
+    // The listener task should exit when the shutdown signal is received or its channels close.
+    // Wait for the WebSocket listener task handle stored in the JellyfinClient.
     if let Some(ws_handle) = jellyfin.take_websocket_handle().await {
         info!("Waiting for WebSocket listener task to finish...");
         if let Err(e) = ws_handle.await {
-            error!("Error waiting for WebSocket listener task: {:?}", e); // Use error log level
+            error!("Error waiting for WebSocket listener task: {:?}", e);
         } else {
-            info!("WebSocket listener task finished successfully."); // Use info log level
+            info!("WebSocket listener task finished.");
         }
     } else {
-        info!("No WebSocket listener handle found to await (might not have started)."); // Use info log level
+        info!("No WebSocket listener handle found to await (might not have started or already taken).");
     }
 
     info!("All tasks finished. Exiting application.");

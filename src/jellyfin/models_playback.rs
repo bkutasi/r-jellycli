@@ -82,8 +82,8 @@ pub struct PlaybackStateInfo {
     pub position_ticks: i64,
     pub duration_ticks: i64, // Item duration
     pub is_paused: bool,
-    pub is_muted: bool,
-    pub volume_level: i32,
+    // pub is_muted: bool, // Removed
+    // pub volume_level: i32, // Removed
     pub is_shuffle: bool,
     pub queue_ids: Vec<String>, // Just the IDs for easier handling
     pub current_queue_index: Option<usize>, // Index within queue_ids
@@ -111,8 +111,6 @@ pub struct PlayStateCommand {
     #[serde(rename = "Command")]
     pub command: String,
     // Arguments might be needed for Seek, etc.
-    #[serde(rename = "SeekPositionTicks")]
-    pub seek_position_ticks: Option<i64>,
     #[serde(rename = "ControllingUserId")]
     pub controlling_user_id: Option<String>, // Added based on potential Jellyfin structure
 }
@@ -127,6 +125,6 @@ pub struct PlayCommand {
     #[serde(rename = "StartIndex")]
     pub start_index: Option<i32>,
     // Add other potential fields if needed based on Jellyfin API
-    #[serde(rename = "StartPositionTicks")]
-    pub start_position_ticks: Option<i64>,
+    // #[serde(rename = "StartPositionTicks")] // Removed seek-related field
+    // pub start_position_ticks: Option<i64>,
 }

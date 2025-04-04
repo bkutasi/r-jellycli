@@ -1,5 +1,6 @@
 //! Jellyfin API client implementation
 
+use crate::player::{PlayerCommand, InternalPlayerStateUpdate};
 use crate::jellyfin::{PlaybackStartReport, PlaybackProgressReport, PlaybackStopReport};
 use serde::Serialize;
 
@@ -8,14 +9,14 @@ use tracing::instrument;
 use crate::jellyfin::models::{ItemsResponse, MediaItem, AuthResponse};
 use crate::jellyfin::session::SessionManager;
 use crate::jellyfin::WebSocketHandler;
-use crate::player::Player;
+// Removed unused import: use crate::player::Player;
 // Removed unused import: use std::sync::atomic::AtomicBool;
 use reqwest::{Client, Error as ReqwestError, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex}; // Add broadcast
+use tokio::sync::{broadcast, mpsc, Mutex}; // Add broadcast, Added mpsc
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -34,6 +35,7 @@ pub struct JellyfinClient {
 
 /// Error types for Jellyfin API operations
 #[derive(Debug)]
+// Removed Clone derive as ReqwestError doesn't implement it
 pub enum JellyfinError {
     Network(ReqwestError),
     Authentication(String),
@@ -76,6 +78,21 @@ impl From<ReqwestError> for JellyfinError {
 // Helper to convert generic errors to JellyfinError::Other
 fn _other_error<E: Error + Send + Sync + 'static>(context: &str, err: E) -> JellyfinError {
     JellyfinError::Other(format!("{}: {}", context, err))
+}
+
+
+// --- Jellyfin API Trait for Mocking ---
+
+#[async_trait::async_trait]
+pub trait JellyfinApiContract: Send + Sync {
+    // Methods required by Player and ws_incoming_handler
+    async fn get_items_details(&self, item_ids: &[String]) -> Result<Vec<MediaItem>, JellyfinError>;
+    async fn get_audio_stream_url(&self, item_id: &str) -> Result<String, JellyfinError>;
+    async fn report_playback_start(&self, report: &PlaybackStartReport) -> Result<(), JellyfinError>;
+    async fn report_playback_stopped(&self, report: &PlaybackStopReport) -> Result<(), JellyfinError>;
+    async fn report_playback_progress(&self, report: &PlaybackProgressReport) -> Result<(), JellyfinError>;
+    fn play_session_id(&self) -> &str;
+    // Add other methods used by consumers if necessary
 }
 
 // --- JellyfinClient Implementation ---
@@ -450,27 +467,18 @@ impl JellyfinClient {
         self._post_json_no_content("/Sessions/Playing/Stopped", report).await
     }
 
-    /// Set the player instance for the WebSocket handler to control.
-    /// This should be called *before* `start_websocket_listener`.
-    #[instrument(skip(self, player))]
-    pub async fn set_player(&self, player: Arc<Mutex<Player>>) -> Result<(), JellyfinError> {
-        debug!("Attempting to set player instance for WebSocket handler");
-        if let Some(websocket_handler_arc) = &self.websocket_handler {
-            let mut handler_guard = websocket_handler_arc.lock().await;
-            handler_guard.set_player(player);
-            info!("Player instance successfully set on WebSocket handler.");
-            Ok(())
-        } else {
-            warn!("Cannot set player - WebSocket handler not initialized or already taken.");
-            Err(JellyfinError::WebSocketError("WebSocket handler not available to set player".to_string()))
-        }
-    }
+    // Removed set_player method as WebSocketHandler no longer holds the player directly.
+    // Channels are passed during listener startup.
 
     /// Spawns the WebSocket listener task.
-    /// Requires `initialize_session` and `set_player` to have been called successfully.
-    // Change signature to accept broadcast::Receiver
-    #[instrument(skip(self, shutdown_rx))]
-    pub async fn start_websocket_listener(&mut self, shutdown_rx: tokio::sync::broadcast::Receiver<()>) -> Result<(), JellyfinError> {
+    /// Requires `initialize_session` to have been called successfully.
+    #[instrument(skip(self, player_command_tx, player_state_rx, shutdown_rx))]
+    pub async fn start_websocket_listener(
+        &mut self,
+        player_command_tx: mpsc::Sender<PlayerCommand>, // Sender for commands TO player
+        player_state_rx: broadcast::Receiver<InternalPlayerStateUpdate>, // Receiver for state FROM player
+        shutdown_rx: broadcast::Receiver<()>, // Receiver for app shutdown
+    ) -> Result<(), JellyfinError> {
         info!("Attempting to start WebSocket listener task...");
 
         let ws_handler_arc = match self.websocket_handler.clone() { // Clone Arc to move into task
@@ -481,26 +489,23 @@ impl JellyfinClient {
             }
         };
 
-        // Check if player is set before spawning (optional but good practice)
-        {
-            let handler_guard = ws_handler_arc.lock().await;
-            if !handler_guard.is_player_set() { // Use the public accessor method
-                 warn!("Starting WebSocket listener, but Player instance was not set beforehand. Incoming commands requiring Player will fail.");
-            }
-        } // Lock released
+        // Player instance check removed, as the handler doesn't hold it directly anymore.
+        // The necessary channels are passed as arguments.
 
 
         // No longer need to clone the AtomicBool
         debug!("Spawning WebSocket listener task...");
+
+        // Clone the command sender for the incoming message handler within the listener task
+        let command_tx_clone = player_command_tx.clone();
 
         let handle = tokio::spawn(async move {
             trace!("WebSocket listener task started execution.");
             // Lock the handler Arc within the task to prepare and listen
             let prepared_result = {
                  let mut handler_guard = ws_handler_arc.lock().await;
-                 // Player should be set now before prepare_for_listening is called
-                 // Pass the receiver instead of the AtomicBool
-                 handler_guard.prepare_for_listening(shutdown_rx)
+                 // Pass the necessary channels to prepare_for_listening
+                 handler_guard.prepare_for_listening(command_tx_clone, player_state_rx, shutdown_rx)
             }; // MutexGuard dropped here
 
             if let Some(mut prepared_handler) = prepared_result {
@@ -545,3 +550,39 @@ impl JellyfinClient {
     pub fn get_api_key(&self) -> Option<&str> { self.api_key.as_deref() }
     pub fn get_user_id(&self) -> Option<&str> { self.user_id.as_deref() }
 }
+
+// --- Trait Implementation for Real Client ---
+
+#[async_trait::async_trait]
+impl JellyfinApiContract for JellyfinClient {
+    async fn get_items_details(&self, item_ids: &[String]) -> Result<Vec<MediaItem>, JellyfinError> {
+        // Delegate to existing method
+        JellyfinClient::get_items_details(self, item_ids).await
+    }
+
+    async fn get_audio_stream_url(&self, item_id: &str) -> Result<String, JellyfinError> {
+        // Delegate to existing method (Note: original get_stream_url wasn't async, adjust if needed or keep sync here)
+        // Assuming the intent was async based on mock usage, let's make the trait async.
+        // The original get_stream_url needs to be made async or called differently.
+        // For now, let's call the sync version and wrap it.
+        // TODO: Review if get_stream_url should be async in JellyfinClient.
+        JellyfinClient::get_stream_url(self, item_id) // Original is sync
+    }
+
+    async fn report_playback_start(&self, report: &PlaybackStartReport) -> Result<(), JellyfinError> {
+        JellyfinClient::report_playback_start(self, report).await
+    }
+
+    async fn report_playback_stopped(&self, report: &PlaybackStopReport) -> Result<(), JellyfinError> {
+        JellyfinClient::report_playback_stopped(self, report).await
+    }
+
+    async fn report_playback_progress(&self, report: &PlaybackProgressReport) -> Result<(), JellyfinError> {
+        JellyfinClient::report_playback_progress(self, report).await
+    }
+
+    fn play_session_id(&self) -> &str {
+        JellyfinClient::play_session_id(self)
+    }
+}
+

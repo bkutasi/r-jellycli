@@ -1,7 +1,8 @@
 // src/audio/playback.rs
+use async_trait::async_trait; // Added this line
+// Removed unused import: use futures::future::BoxFuture;
 use std::sync::Mutex; // Use std Mutex for AlsaPcmHandler - Keep this one
 use tokio::sync::Mutex as TokioMutex;
-// Remove potential duplicate tokio::sync::Mutex import if it exists (compiler warning indicated it)
 use symphonia::core::audio::Signal;
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use crate::audio::{
@@ -12,6 +13,7 @@ use crate::audio::{
     // format_converter, // Removed unused import
     progress::{PlaybackProgressInfo, SharedProgress}, // Removed PROGRESS_UPDATE_INTERVAL
     stream_wrapper::ReqwestStreamWrapper,
+    sample_converter, // Added import
 };
 // use indicatif::{ProgressBar, ProgressStyle}; // Removed indicatif import
 use tracing::{debug, error, info, trace, warn, instrument}; // Replaced log with tracing, added instrument
@@ -32,6 +34,57 @@ use std::any::TypeId; // For checking generic type S
 
 const LOG_TARGET: &str = "r_jellycli::audio::playback"; // Main orchestrator log target
 
+/// Callback type for when playback finishes naturally.
+type OnFinishCallback = Box<dyn FnOnce() + Send + Sync + 'static>;
+
+/// Trait defining the controls for an audio playback backend.
+#[async_trait]
+pub trait AudioPlaybackControl: Send + Sync {
+    /// Starts playing the audio stream from the given URL.
+    /// Takes ownership of an `on_finish` callback to be executed when playback
+    /// completes naturally (reaches end of stream).
+    async fn play(
+        &mut self,
+        url: &str,
+        total_duration_ticks: Option<i64>,
+        on_finish: OnFinishCallback,
+        shutdown_rx: broadcast::Receiver<()>, // Add shutdown receiver
+    ) -> Result<(), AudioError>;
+
+    /// Pauses the current playback.
+    async fn pause(&mut self) -> Result<(), AudioError>;
+
+    /// Resumes the current playback.
+    async fn resume(&mut self) -> Result<(), AudioError>;
+
+    // /// Stops playback completely and cleans up resources for the current stream.
+    // async fn stop(&mut self) -> Result<(), AudioError>; // Removed - stop is handled by Player logic calling shutdown/dropping backend
+
+
+    /// Gets the current playback position in ticks.
+    async fn get_current_position_ticks(&self) -> Result<i64, AudioError>;
+
+    // --- Volume/Mute/Seek methods removed ---
+
+    // /// Sets a callback to be invoked when the current track finishes playing naturally.
+    // /// Replaced by passing callback directly to `play`.
+    // async fn set_on_finish_callback(&mut self, callback: OnFinishCallback);
+
+    /// Provides a way to pass the shared pause state Arc<TokioMutex<bool>>
+    /// from the Player to the audio backend. This is necessary because the pause
+    /// state is managed externally by the Player based on commands, but the
+    /// audio loop needs to react to it.
+    fn set_pause_state_tracker(&mut self, state: Arc<TokioMutex<bool>>);
+
+    /// Provides a way to pass the shared progress state Arc<TokioMutex<PlaybackProgressInfo>>
+    /// from the Player to the audio backend.
+    fn set_progress_tracker(&mut self, tracker: SharedProgress);
+
+    /// Performs a full shutdown of the audio backend (e.g., closing ALSA device).
+    /// Should be called before dropping the implementing struct.
+    async fn shutdown(&mut self) -> Result<(), AudioError>;
+}
+
 
 /// Indicates the reason why the playback loop terminated successfully.
 #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +101,7 @@ pub struct PlaybackOrchestrator { // Renamed from AlsaPlayer
     progress_info: Option<SharedProgress>,
     resampler: Option<Arc<TokioMutex<SincFixedIn<f32>>>>,
     pause_state: Option<Arc<TokioMutex<bool>>>, // Added: Shared pause state
+    on_finish_callback: Option<OnFinishCallback>, // Callback for when track finishes
 }
 
 impl PlaybackOrchestrator { // Renamed from AlsaPlayer
@@ -61,20 +115,22 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
             progress_info: None,
             resampler: None,
             pause_state: None, // Initialize pause state
+            on_finish_callback: None,
         }
     }
 
-    /// Sets the shared progress tracker.
-    pub fn set_progress_tracker(&mut self, tracker: SharedProgress) {
-        debug!(target: LOG_TARGET, "Progress tracker configured.");
-        self.progress_info = Some(tracker);
-    }
-
-    /// Sets the shared pause state tracker.
-    pub fn set_pause_state(&mut self, state: Arc<TokioMutex<bool>>) {
-        debug!(target: LOG_TARGET, "Pause state tracker configured.");
-        self.pause_state = Some(state);
-    }
+    // Note: These methods are now part of the AudioPlaybackControl trait implementation
+    // /// Sets the shared progress tracker.
+    // pub fn set_progress_tracker(&mut self, tracker: SharedProgress) {
+    //     debug!(target: LOG_TARGET, "Progress tracker configured.");
+    //     self.progress_info = Some(tracker);
+    // }
+    //
+    // /// Sets the shared pause state tracker.
+    // pub fn set_pause_state(&mut self, state: Arc<TokioMutex<bool>>) {
+    //     debug!(target: LOG_TARGET, "Pause state tracker configured.");
+    //     self.pause_state = Some(state);
+    // }
 
     // --- Private Helper Methods ---
     /// Writes the decoded S16LE buffer to ALSA, handling blocking and shutdown signals.
@@ -156,201 +212,7 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
         Ok(())
     }
 
-    /// Converts a generic Symphonia AudioBuffer into an interleaved S16LE Vec.
-    fn _convert_buffer_to_s16<S: Sample + 'static>(
-        &self,
-        audio_buffer: symphonia::core::audio::AudioBuffer<S>,
-    ) -> Result<Vec<i16>, AudioError> {
-        let spec = audio_buffer.spec();
-        let num_frames = audio_buffer.frames();
-        let num_channels = spec.channels.count();
-        let mut s16_vec = vec![0i16; num_frames * num_channels];
-
-        let type_id_s = TypeId::of::<S>();
-        let planes_data = audio_buffer.planes();
-        let channel_planes = planes_data.planes(); // Get the slices
-
-        trace!(target: LOG_TARGET, "Converting buffer ({} frames, {} channels, type: {:?}) to S16LE", num_frames, num_channels, type_id_s);
-
-        // --- Conversion Logic (adapted from old code) ---
-        if type_id_s == TypeId::of::<i16>() {
-            trace!(target: LOG_TARGET, "Input is S16");
-            // Safety: We checked TypeId. Accessing as *const i16.
-            if num_channels == 1 {
-                let plane_s16 = unsafe { std::slice::from_raw_parts(channel_planes[0].as_ptr() as *const i16, num_frames) };
-                s16_vec.copy_from_slice(plane_s16);
-            } else {
-                for frame in 0..num_frames {
-                    for ch in 0..num_channels {
-                        let sample_s16 = unsafe { *(channel_planes[ch].as_ptr() as *const i16).add(frame) };
-                        s16_vec[frame * num_channels + ch] = sample_s16;
-                    }
-                }
-            }
-        } else if type_id_s == TypeId::of::<u8>() {
-            trace!(target: LOG_TARGET, "Input is U8");
-            // Safety: We checked TypeId. Accessing as *const u8.
-            if num_channels == 1 {
-                let plane_u8 = unsafe { std::slice::from_raw_parts(channel_planes[0].as_ptr() as *const u8, num_frames) };
-                for frame in 0..num_frames {
-                    s16_vec[frame] = ((plane_u8[frame] as i16 - 128) * 256) as i16;
-                }
-            } else {
-                for frame in 0..num_frames {
-                    for ch in 0..num_channels {
-                        let sample_u8 = unsafe { *(channel_planes[ch].as_ptr() as *const u8).add(frame) };
-                        s16_vec[frame * num_channels + ch] = ((sample_u8 as i16 - 128) * 256) as i16;
-                    }
-                }
-            }
-        } else if type_id_s == TypeId::of::<i32>() {
-            trace!(target: LOG_TARGET, "Input is S32/S24");
-             // Safety: We checked TypeId. Accessing as *const i32.
-            // Assumes S32 or S24 packed in i32. Convert to S16 by right-shifting.
-            if num_channels == 1 {
-                let plane_i32 = unsafe { std::slice::from_raw_parts(channel_planes[0].as_ptr() as *const i32, num_frames) };
-                for frame in 0..num_frames {
-                    s16_vec[frame] = (plane_i32[frame] >> 16) as i16; // S32 -> S16
-                }
-            } else {
-                for frame in 0..num_frames {
-                    for ch in 0..num_channels {
-                        let sample_i32 = unsafe { *(channel_planes[ch].as_ptr() as *const i32).add(frame) };
-                        s16_vec[frame * num_channels + ch] = (sample_i32 >> 16) as i16; // S32 -> S16
-                    }
-                }
-            }
-        } else if type_id_s == TypeId::of::<f32>() {
-            trace!(target: LOG_TARGET, "Input is F32");
-            // Safety: We checked TypeId. Accessing as *const f32.
-            if num_channels == 1 {
-                let plane_f32 = unsafe { std::slice::from_raw_parts(channel_planes[0].as_ptr() as *const f32, num_frames) };
-                for frame in 0..num_frames {
-                    s16_vec[frame] = (plane_f32[frame] * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                }
-            } else {
-                for frame in 0..num_frames {
-                    for ch in 0..num_channels {
-                        let sample_f32 = unsafe { *(channel_planes[ch].as_ptr() as *const f32).add(frame) };
-                        s16_vec[frame * num_channels + ch] = (sample_f32 * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                    }
-                }
-            }
-        } else if type_id_s == TypeId::of::<f64>() {
-             trace!(target: LOG_TARGET, "Input is F64");
-             // Safety: We checked TypeId. Accessing as *const f64.
-            if num_channels == 1 {
-                let plane_f64 = unsafe { std::slice::from_raw_parts(channel_planes[0].as_ptr() as *const f64, num_frames) };
-                for frame in 0..num_frames {
-                    s16_vec[frame] = (plane_f64[frame] * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                }
-            } else {
-                for frame in 0..num_frames {
-                    for ch in 0..num_channels {
-                        let sample_f64 = unsafe { *(channel_planes[ch].as_ptr() as *const f64).add(frame) };
-                        s16_vec[frame * num_channels + ch] = (sample_f64 * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                    }
-                }
-            }
-        } else {
-            warn!(target: LOG_TARGET, "Unsupported sample type {:?} for direct S16 conversion.", TypeId::of::<S>());
-            // Return silence or an error? Let's return an error.
-             return Err(AudioError::UnsupportedFormat("Cannot convert decoded format to S16".to_string()));
-        }
-
-        Ok(s16_vec)
-    }
-    /// Converts a generic Symphonia AudioBuffer into Vec<Vec<f32>> suitable for Rubato.
-    fn _convert_buffer_to_f32_vecs<S: Sample + 'static>(
-        &self,
-        audio_buffer: symphonia::core::audio::AudioBuffer<S>,
-    ) -> Result<Vec<Vec<f32>>, AudioError> {
-        let spec = audio_buffer.spec();
-        let num_frames = audio_buffer.frames();
-        let num_channels = spec.channels.count();
-        let mut f32_vecs: Vec<Vec<f32>> = vec![vec![0.0f32; num_frames]; num_channels];
-
-        let type_id_s = TypeId::of::<S>();
-        let planes_data = audio_buffer.planes();
-        let channel_planes = planes_data.planes(); // Get the slices
-
-        trace!(target: LOG_TARGET, "Converting buffer ({} frames, {} channels, type: {:?}) to Vec<Vec<f32>>", num_frames, num_channels, type_id_s);
-
-        // --- Conversion Logic ---
-        if type_id_s == TypeId::of::<i16>() {
-            for ch in 0..num_channels {
-                let plane_s16 = unsafe { std::slice::from_raw_parts(channel_planes[ch].as_ptr() as *const i16, num_frames) };
-                for frame in 0..num_frames {
-                    f32_vecs[ch][frame] = plane_s16[frame] as f32 / 32768.0;
-                }
-            }
-        } else if type_id_s == TypeId::of::<u8>() {
-            for ch in 0..num_channels {
-                let plane_u8 = unsafe { std::slice::from_raw_parts(channel_planes[ch].as_ptr() as *const u8, num_frames) };
-                for frame in 0..num_frames {
-                    f32_vecs[ch][frame] = ((plane_u8[frame] as i16 - 128) as f32) / 128.0;
-                }
-            }
-        } else if type_id_s == TypeId::of::<i32>() { // Handles S32 and S24
-            for ch in 0..num_channels {
-                let plane_i32 = unsafe { std::slice::from_raw_parts(channel_planes[ch].as_ptr() as *const i32, num_frames) };
-                for frame in 0..num_frames {
-                    // Assuming S24/S32 input, scale to f32 range
-                    f32_vecs[ch][frame] = (plane_i32[frame] as f64 / 2147483648.0) as f32; // Normalize S32 range
-                }
-            }
-        } else if type_id_s == TypeId::of::<f32>() {
-            for ch in 0..num_channels {
-                let plane_f32 = unsafe { std::slice::from_raw_parts(channel_planes[ch].as_ptr() as *const f32, num_frames) };
-                f32_vecs[ch].copy_from_slice(plane_f32);
-            }
-        } else if type_id_s == TypeId::of::<f64>() {
-             for ch in 0..num_channels {
-                let plane_f64 = unsafe { std::slice::from_raw_parts(channel_planes[ch].as_ptr() as *const f64, num_frames) };
-                for frame in 0..num_frames {
-                    f32_vecs[ch][frame] = plane_f64[frame] as f32; // Direct conversion, assuming f64 is already in [-1.0, 1.0]
-                }
-            }
-        } else {
-            warn!(target: LOG_TARGET, "Unsupported sample type {:?} for F32 conversion.", TypeId::of::<S>());
-            return Err(AudioError::UnsupportedFormat("Cannot convert decoded format to F32 for resampling".to_string()));
-        }
-
-        Ok(f32_vecs)
-    }
-
-    /// Converts Vec<Vec<f32>> (output from Rubato) into an interleaved S16LE Vec.
-    fn _convert_f32_vecs_to_s16(
-        &self,
-        f32_vecs: Vec<Vec<f32>>,
-    ) -> Result<Vec<i16>, AudioError> {
-        if f32_vecs.is_empty() || f32_vecs[0].is_empty() {
-            return Ok(Vec::new()); // Return empty if input is empty
-        }
-
-        let num_channels = f32_vecs.len();
-        let num_frames = f32_vecs[0].len(); // Assume all channels have the same length
-        let mut s16_vec = vec![0i16; num_frames * num_channels];
-
-        trace!(target: LOG_TARGET, "Converting Vec<Vec<f32>> ({} frames, {} channels) to interleaved S16LE", num_frames, num_channels);
-
-        for frame in 0..num_frames {
-            for ch in 0..num_channels {
-                // Ensure channel exists and frame index is valid
-                if ch < f32_vecs.len() && frame < f32_vecs[ch].len() {
-                    let sample_f32 = f32_vecs[ch][frame];
-                    // Scale f32 [-1.0, 1.0] to i16 [-32768, 32767]
-                    s16_vec[frame * num_channels + ch] = (sample_f32 * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                } else {
-                    // Handle potential inconsistency in channel lengths (shouldn't happen with rubato)
-                    warn!(target: LOG_TARGET, "Inconsistent channel lengths detected during F32 to S16 conversion at frame {}, channel {}", frame, ch);
-                    s16_vec[frame * num_channels + ch] = 0; // Fill with silence
-                }
-            }
-        }
-
-        Ok(s16_vec)
-    }
+    // Conversion functions moved to sample_converter module
 
 
     /// Updates the shared progress information based on the current timestamp.
@@ -592,7 +454,7 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
                             Ok(f32_output_vecs) => {
                                 if !f32_output_vecs.is_empty() && !f32_output_vecs[0].is_empty() {
                                     trace!(target: LOG_TARGET, "Resampler flush successful, got {} output frames.", f32_output_vecs.get(0).map_or(0, |v| v.len()));
-                                    match self._convert_f32_vecs_to_s16(f32_output_vecs) {
+                                    match sample_converter::convert_f32_vecs_to_s16(f32_output_vecs) { // Use sample_converter module
                                         Ok(s16_vec) => {
                                             if !s16_vec.is_empty() {
                                                 // Use the getter for requested_spec
@@ -653,14 +515,19 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
 
     // --- Public Methods ---
 
-    /// Streams audio from a URL, decodes it, plays it via ALSA, and updates progress.
-    #[instrument(skip(self, shutdown_rx), fields(url))]
-    pub async fn stream_decode_and_play(
+    /// Internal method to stream, decode, and play. Called by the `play` trait method.
+    /// Takes ownership of the finish callback.
+    #[instrument(skip(self, shutdown_rx, on_finish), fields(url))]
+    async fn internal_stream_decode_and_play(
         &mut self,
         url: &str,
-        _total_duration_ticks: Option<i64>, // Prefixed unused variable
-        shutdown_rx: broadcast::Receiver<()>,
+        _total_duration_ticks: Option<i64>, // Keep for potential future use (e.g., progress bar)
+        shutdown_rx: broadcast::Receiver<()>, // Removed mut
+        on_finish: OnFinishCallback,
     ) -> Result<(), AudioError> {
+        // Store the callback
+        self.on_finish_callback = Some(on_finish);
+
         info!(target: LOG_TARGET, "Starting stream/decode/play for URL: {}", url);
 
         // --- HTTP Streaming Setup ---
@@ -677,10 +544,11 @@ impl PlaybackOrchestrator { // Renamed from AlsaPlayer
         let initial_spec = decoder.initial_spec().ok_or(AudioError::InitializationError("Decoder failed to provide initial spec".to_string()))?;
         let _track_time_base = decoder.time_base();
 // --- ALSA Initialization & Get Actual Rate ---
+// --- ALSA Initialization & Get Actual Rate ---
 let actual_rate = {
-    let mut handler_guard = self.alsa_handler.lock().map_err(|e| AudioError::InvalidState(format!("ALSA handler mutex poisoned on init: {}", e)))?;
-    handler_guard.initialize(initial_spec)?;
-    handler_guard.get_actual_rate().ok_or_else(|| AudioError::InitializationError("ALSA handler did not return actual rate after initialization".to_string()))?
+   let mut handler_guard = self.alsa_handler.lock().map_err(|e| AudioError::InvalidState(format!("ALSA handler mutex poisoned on init: {}", e)))?;
+   handler_guard.initialize(initial_spec)?;
+   handler_guard.get_actual_rate().ok_or_else(|| AudioError::InitializationError("ALSA handler did not return actual rate after initialization".to_string()))?
 };
 debug!(target: LOG_TARGET, "Decoder rate: {}, ALSA actual rate: {}", initial_spec.rate, actual_rate);
 
@@ -715,12 +583,16 @@ if decoder_rate != actual_rate {
         // --- Call Non-Generic Playback Loop ---
         // The loop now handles different buffer types internally.
         info!(target: LOG_TARGET, "Starting playback loop (handles format internally)...");
+        // --- Call Non-Generic Playback Loop ---
+        // The loop now handles different buffer types internally.
+        info!(target: LOG_TARGET, "Starting playback loop (handles format internally)...");
         let loop_result = self.playback_loop(decoder, /* pb, */ shutdown_rx).await; // Removed pb arg
 
         // --- End Playback Loop ---
-        match loop_result {
+        let _ = match loop_result { // Ignore the result as suggested by warning
             Ok(PlaybackLoopExitReason::EndOfStream) => {
                 info!(target: LOG_TARGET, "Playback loop finished normally (EndOfStream). Draining ALSA buffer...");
+                // Lock the mutex before calling drain
                 // Lock the mutex before calling drain
                 if let Ok(guard) = self.alsa_handler.lock() {
                     if let Err(e) = guard.drain() {
@@ -736,15 +608,34 @@ if decoder_rate != actual_rate {
                 Ok(()) // Playback completed successfully overall
             }
             Ok(PlaybackLoopExitReason::ShutdownSignal) => {
-                info!(target: LOG_TARGET, "Playback loop terminated by shutdown signal. Skipping final drain.");
+                info!(target: LOG_TARGET, "Playback loop terminated by shutdown signal. Skipping final drain and finish callback.");
                 Ok(()) // Shutdown is not an error state for the playback function itself
             }
-            Err(e) => {
+            Err(ref e) => {
                 error!(target: LOG_TARGET, "Playback loop failed with error: {}", e);
                 Err(e) // Propagate the error
             }
+        };
+
+        // --- Handle Finish Callback ---
+        // Call the callback only if the loop exited normally (EndOfStream)
+        // --- Handle Finish Callback ---
+        // Call the callback only if the loop exited normally (EndOfStream)
+        if matches!(loop_result, Ok(PlaybackLoopExitReason::EndOfStream)) {
+             if let Some(callback) = self.on_finish_callback.take() {
+                 info!(target: LOG_TARGET, "Executing on_finish callback.");
+                 callback();
+             } else {
+                 warn!(target: LOG_TARGET, "Playback finished but no on_finish callback was set or it was already taken.");
+             }
+             // Return Ok(()) to indicate successful completion of playback.
+             Ok(())
+        } else {
+            // If loop exited due to shutdown or error, propagate the result without calling callback.
+            loop_result.map(|_| ()) // Discard the Ok(ShutdownSignal) value, keep Err(e)
         }
     }
+
 
 
     /// Performs graceful asynchronous shutdown of the playback orchestrator.
@@ -764,49 +655,39 @@ if decoder_rate != actual_rate {
             debug!(target: LOG_TARGET, "Reset shared progress info.");
             // Lock guard drops automatically here
         }
-
-        // 3. Close ALSA Handler (Blocking operation in spawn_blocking with timeout)
-        let alsa_handler_clone = Arc::clone(&self.alsa_handler);
-        let close_timeout = std::time::Duration::from_secs(5); // Add a 5-second timeout
-        debug!(target: LOG_TARGET, "Spawning blocking task for ALSA close with {:?} timeout...", close_timeout);
-        let close_future = task::spawn_blocking(move || {
-            debug!(target: LOG_TARGET, "Executing blocking ALSA close operation...");
-            match alsa_handler_clone.lock() { // std::sync::Mutex lock
-                Ok(mut guard) => { // Make guard mutable as close() likely needs &mut self
-                    guard.close(); // This might block (e.g., drain)
-                    debug!(target: LOG_TARGET, "ALSA handler closed in blocking task.");
-                    Ok(()) // Indicate success
+        // 3. Close ALSA Handler (Using spawn_blocking for the potentially blocking close)
+        debug!(target: LOG_TARGET, "Attempting to shut down ALSA handler in blocking task...");
+        let handler_clone = Arc::clone(&self.alsa_handler); // Clone Arc for the blocking task
+        let shutdown_result = task::spawn_blocking(move || {
+            match handler_clone.lock() { // std::sync::Mutex lock inside blocking task
+                Ok(mut guard) => {
+                    // Call shutdown_device, which triggers close_internal -> pcm.take() -> drop -> snd_pcm_close
+                    guard.shutdown_device();
+                    debug!(target: LOG_TARGET, "ALSA handler shutdown_device() called successfully within blocking task.");
+                    Ok(()) // Indicate success from the blocking task's perspective
                 }
                 Err(poisoned) => {
-                    error!(target: LOG_TARGET, "ALSA handler mutex poisoned during close: {}", poisoned);
-                    Err(AudioError::InvalidState("ALSA handler mutex poisoned during close".to_string()))
+                    error!(target: LOG_TARGET, "ALSA handler mutex poisoned during blocking shutdown: {}", poisoned);
+                    // Return an error that can be handled after awaiting the task
+                    Err(AudioError::InvalidState("ALSA handler mutex poisoned during shutdown".to_string()))
                 }
             }
-        });
+        }).await; // Await the JoinHandle
 
-        // Await the JoinHandle with a timeout
-        match tokio::time::timeout(close_timeout, close_future).await {
-            Ok(join_handle_result) => { // Timeout did not expire
-                // Handle potential errors from spawn_blocking (task panic or returned error)
-                match join_handle_result {
-                    Ok(Ok(())) => {
-                        debug!(target: LOG_TARGET, "Blocking ALSA close task completed successfully within timeout.");
-                    }
-                    Ok(Err(e)) => {
-                        error!(target: LOG_TARGET, "Error returned from blocking ALSA close task: {}", e);
-                        // Propagate the error if needed, or just log it
-                        return Err(e);
-                    }
-                    Err(join_error) => {
-                        error!(target: LOG_TARGET, "Blocking ALSA close task panicked: {}", join_error);
-                        return Err(AudioError::TaskJoinError(join_error.to_string()));
-                    }
-                }
+        // Handle the result from spawn_blocking
+        match shutdown_result {
+            Ok(Ok(())) => {
+                debug!(target: LOG_TARGET, "ALSA handler shutdown task completed successfully.");
             }
-            Err(_) => { // Timeout expired
-                error!(target: LOG_TARGET, "Timeout expired ({:?}) waiting for blocking ALSA close task. ALSA resources might not be released cleanly.", close_timeout);
-                // Continue shutdown despite timeout, but maybe return an error or warning?
-                // For now, let's log and continue, returning Ok(()) at the end.
+            Ok(Err(e)) => {
+                error!(target: LOG_TARGET, "ALSA handler shutdown task returned error: {}", e);
+                // Propagate the error from the blocking task
+                return Err(e);
+            }
+            Err(join_err) => {
+                error!(target: LOG_TARGET, "ALSA handler shutdown task panicked or was cancelled: {}", join_err);
+                // Return a specific error for join errors
+                return Err(AudioError::TaskJoinError(format!("ALSA shutdown task failed: {}", join_err)));
             }
         }
 
@@ -820,19 +701,6 @@ if decoder_rate != actual_rate {
     }
 
 
-    /// Original close method, now simplified for synchronous cleanup (called by Drop).
-    /// This should perform minimal, non-blocking cleanup. The main cleanup
-    /// is now handled by the async `shutdown` method.
-    fn close(&mut self) {
-        info!(target: LOG_TARGET, "Executing synchronous close (called from Drop). Minimal cleanup.");
-        // Only perform actions here that are safe and necessary in a synchronous drop context.
-        // For example, clearing references that don't involve blocking I/O.
-        self.resampler = None;
-
-        // Progress bar cleanup removed from close/drop
-        // DO NOT attempt to lock/close the ALSA handler here.
-        // DO NOT attempt to lock/reset the async progress_info here.
-    }
     // Helper function moved inside impl block
     async fn _process_buffer<S: Sample + std::fmt::Debug + Send + Sync + 'static>(
         &mut self,
@@ -856,7 +724,7 @@ if decoder_rate != actual_rate {
             trace!(target: LOG_TARGET, "Resampling buffer in chunks...");
 
             // 1. Convert the entire input buffer to f32 vectors first
-            let f32_input_vecs = match self._convert_buffer_to_f32_vecs(audio_buffer) {
+            let f32_input_vecs = match sample_converter::convert_buffer_to_f32_vecs(audio_buffer) {
                 Ok(vecs) => vecs,
                 Err(e) => {
                     warn!(target: LOG_TARGET, "Failed to convert buffer to F32 for resampling: {}. Skipping buffer.", e);
@@ -923,7 +791,7 @@ if decoder_rate != actual_rate {
 
             // 3. Convert the accumulated resampled f32 vectors to s16
             trace!(target: LOG_TARGET, "Converting accumulated resampled output ({} frames) to S16...", accumulated_output_vecs.get(0).map_or(0, |v| v.len()));
-            s16_vec = match self._convert_f32_vecs_to_s16(accumulated_output_vecs) {
+            s16_vec = match sample_converter::convert_f32_vecs_to_s16(accumulated_output_vecs) {
                 Ok(vec) => vec,
                 Err(e) => {
                     warn!(target: LOG_TARGET, "Failed to convert accumulated resampled F32 buffer to S16: {}. Skipping buffer.", e);
@@ -933,7 +801,7 @@ if decoder_rate != actual_rate {
 
         } else { // No resampler needed
             trace!(target: LOG_TARGET, "No resampling needed, converting directly to S16...");
-            s16_vec = match self._convert_buffer_to_s16(audio_buffer) {
+            s16_vec = match sample_converter::convert_buffer_to_s16(audio_buffer) {
                 Ok(vec) => vec,
                 Err(e) => {
                     warn!(target: LOG_TARGET, "Failed to convert buffer to S16: {}. Skipping buffer.", e);
@@ -953,16 +821,115 @@ if decoder_rate != actual_rate {
 } // End impl PlaybackOrchestrator
 
 
+#[async_trait]
+impl AudioPlaybackControl for PlaybackOrchestrator {
+    #[instrument(skip(self, on_finish), fields(url))]
+    async fn play(
+        &mut self,
+        url: &str,
+        total_duration_ticks: Option<i64>,
+        on_finish: OnFinishCallback,
+        shutdown_rx: broadcast::Receiver<()>, // Add shutdown_rx parameter (removed mut)
+    ) -> Result<(), AudioError> {
+        info!(target: LOG_TARGET, "AudioPlaybackControl::play called.");
+        // Remove the dummy channel creation, use the passed-in receiver
+        // let (_dummy_shutdown_tx, shutdown_rx) = broadcast::channel(1); // REMOVED
+
+        // Pass the received shutdown_rx to the internal method
+        self.internal_stream_decode_and_play(url, total_duration_ticks, shutdown_rx, on_finish).await
+    }
+
+    #[instrument(skip(self))]
+    async fn pause(&mut self) -> Result<(), AudioError> {
+        info!(target: LOG_TARGET, "AudioPlaybackControl::pause called.");
+        // This relies on the shared pause_state being set externally.
+        // The playback loop handles calling alsa_handler.pause() based on the state.
+        // We might want to directly call alsa_handler.pause here if immediate effect is needed,
+        // but coordinating with the loop's state check is complex.
+        // For now, assume external state management via set_pause_state_tracker is sufficient.
+        if self.pause_state.is_none() {
+             warn!(target: LOG_TARGET, "Pause called, but pause state tracker is not set.");
+             return Err(AudioError::InvalidState("Pause state tracker not configured".to_string()));
+        }
+        // Set the shared state to true. The loop will detect this and pause ALSA.
+        let mut guard = self.pause_state.as_ref().unwrap().lock().await;
+        *guard = true;
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn resume(&mut self) -> Result<(), AudioError> {
+        info!(target: LOG_TARGET, "AudioPlaybackControl::resume called.");
+        // Similar logic to pause: set the shared state, the loop handles ALSA resume.
+        if self.pause_state.is_none() {
+             warn!(target: LOG_TARGET, "Resume called, but pause state tracker is not set.");
+             return Err(AudioError::InvalidState("Pause state tracker not configured".to_string()));
+        }
+        // Set the shared state to false. The loop will detect this and resume ALSA.
+        let mut guard = self.pause_state.as_ref().unwrap().lock().await;
+        *guard = false;
+        Ok(())
+    }
+
+    // Removed orphaned `stop` method implementation
+
+
+    #[instrument(skip(self))]
+    async fn get_current_position_ticks(&self) -> Result<i64, AudioError> {
+        trace!(target: LOG_TARGET, "AudioPlaybackControl::get_current_position_ticks called.");
+        if let Some(progress_arc) = &self.progress_info {
+            let progress_guard = progress_arc.lock().await;
+            let position_ticks = (progress_guard.current_seconds * 10_000_000.0) as i64;
+            trace!(target: LOG_TARGET, "Returning position_ticks: {}", position_ticks);
+            Ok(position_ticks)
+        } else {
+            trace!(target: LOG_TARGET, "Progress info not available, returning 0 ticks.");
+            // Return 0 or an error if progress isn't available? Let's return 0.
+            Ok(0)
+            // Err(AudioError::InvalidState("Progress tracker not configured".to_string()))
+        }
+    }
+
+    // --- Volume/Mute/Seek method implementations removed ---
+
+    // /// Sets the callback to be invoked when the current track finishes playing naturally.
+    // #[instrument(skip(self, callback))]
+    // async fn set_on_finish_callback(&mut self, callback: OnFinishCallback) {
+    //     info!(target: LOG_TARGET, "AudioPlaybackControl::set_on_finish_callback called.");
+    //     self.on_finish_callback = Some(callback);
+    // }
+
+    /// Sets the shared pause state tracker.
+    fn set_pause_state_tracker(&mut self, state: Arc<TokioMutex<bool>>) {
+        debug!(target: LOG_TARGET, "Pause state tracker configured via trait method.");
+        self.pause_state = Some(state);
+    }
+
+    /// Sets the shared progress tracker.
+    fn set_progress_tracker(&mut self, tracker: SharedProgress) {
+        debug!(target: LOG_TARGET, "Progress tracker configured via trait method.");
+        self.progress_info = Some(tracker);
+    }
+
+    /// Performs a full shutdown of the audio backend.
+    #[instrument(skip(self))]
+    async fn shutdown(&mut self) -> Result<(), AudioError> {
+        info!(target: LOG_TARGET, "AudioPlaybackControl::shutdown called (delegating to PlaybackOrchestrator::shutdown).");
+        // Call the existing async shutdown method which now uses spawn_blocking internally
+        PlaybackOrchestrator::shutdown(self).await
+    }
+}
+
+
 impl Drop for PlaybackOrchestrator {
     fn drop(&mut self) {
         // IMPORTANT: Avoid calling potentially blocking or async operations here.
-        // Rely on the explicit `shutdown()` method for proper cleanup.
+        // Rely on the explicit async `shutdown()` method for proper cleanup.
         // If `shutdown()` was not called, resources like the ALSA handler
-        // might not be cleaned up gracefully, but calling blocking code here
-        // can lead to panics or deadlocks.
-        debug!(target: LOG_TARGET, "Dropping PlaybackOrchestrator. Explicit shutdown() is recommended for graceful cleanup.");
-        // We can call the *simplified* synchronous self.close() if it only does non-blocking things.
-        self.close();
+        // might not be cleaned up gracefully (especially the blocking close).
+        // Calling blocking code here can lead to panics or deadlocks.
+        debug!(target: LOG_TARGET, "Dropping PlaybackOrchestrator. Explicit async shutdown() is required for graceful ALSA cleanup.");
+        // DO NOT call self.shutdown() or any potentially blocking methods here.
     }
 }
 

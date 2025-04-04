@@ -319,66 +319,103 @@ pub fn sample_format(&self) -> Option<symphonia::core::sample::SampleFormat> {
                 continue; // Read the next packet
             }
 
-            match decoder.decode(&packet) {
-                Ok(audio_buf_ref) => {
-                    // --- Check for Spec Changes ---
-                    if let Some(initial_spec) = self.initial_spec {
-                         if audio_buf_ref.spec() != &initial_spec {
-                            warn!(
-                                target: LOG_TARGET,
-                                "Audio specification changed mid-stream! Expected: {:?}, Got: {:?}. Stopping.",
-                                initial_spec, audio_buf_ref.spec()
-                            );
-                            self.format_reader = Some(format_reader);
-                            self.decoder = Some(decoder);
-                            trace!(target: LOG_TARGET, "decode_next_frame: Returning Err(AudioError::UnsupportedFormat(\"Dynamic spec change\"))");
-                            return Err(AudioError::UnsupportedFormat("Dynamic spec change".to_string()));
+            // --- Decode Packet (in blocking task with shutdown check) ---
+            // Clone packet data as it needs to move into the blocking task
+            // Need to clone the packet itself, not just data, if decode needs metadata
+            let packet_clone = packet.clone(); // Clone the whole packet
+            let mut decode_future = task::spawn_blocking(move || { // Add mut here
+                // Move decoder into the blocking task
+                let decode_result = decoder.decode(&packet_clone);
+
+                // Convert the result *inside* the blocking task
+                let owned_result: Result<DecodedBufferAndTimestamp, SymphoniaError> = match decode_result {
+                    Ok(audio_buf_ref) => {
+                        // Convert BufferRef to Owned Enum Variant
+                        match audio_buf_ref {
+                            AudioBufferRef::U8(buf) => Ok(DecodedBufferAndTimestamp::U8(buf.into_owned(), packet_ts)),
+                            AudioBufferRef::S16(buf) => Ok(DecodedBufferAndTimestamp::S16(buf.into_owned(), packet_ts)),
+                            AudioBufferRef::S24(buf) => Ok(DecodedBufferAndTimestamp::S24(buf.into_owned(), packet_ts)),
+                            AudioBufferRef::S32(buf) => Ok(DecodedBufferAndTimestamp::S32(buf.into_owned(), packet_ts)),
+                            AudioBufferRef::F32(buf) => Ok(DecodedBufferAndTimestamp::F32(buf.into_owned(), packet_ts)),
+                            AudioBufferRef::F64(buf) => Ok(DecodedBufferAndTimestamp::F64(buf.into_owned(), packet_ts)),
+                            _ => Err(SymphoniaError::Unsupported("Unsupported AudioBufferRef variant")), // Return error for unsupported
                         }
-                    } else {
-                         error!(target: LOG_TARGET, "Initial spec missing during decode check!");
-                         self.format_reader = Some(format_reader);
-                         self.decoder = Some(decoder);
-                         trace!(target: LOG_TARGET, "decode_next_frame: Returning Err(AudioError::InvalidState(\"Initial spec missing\"))");
-                         return Err(AudioError::InvalidState("Initial spec missing".to_string()));
                     }
+                    Err(e) => Err(e), // Pass through Symphonia errors
+                };
 
-                    // --- Convert BufferRef to Owned Enum Variant ---
-                    let owned_decoded_buffer = match audio_buf_ref {
-                        // Use .into_owned() to convert Cow -> owned AudioBuffer
-                        AudioBufferRef::U8(buf) => DecodeRefResult::DecodedOwned(DecodedBufferAndTimestamp::U8(buf.into_owned(), packet_ts)),
-                        AudioBufferRef::S16(buf) => DecodeRefResult::DecodedOwned(DecodedBufferAndTimestamp::S16(buf.into_owned(), packet_ts)),
-                        AudioBufferRef::S24(buf) => DecodeRefResult::DecodedOwned(DecodedBufferAndTimestamp::S24(buf.into_owned(), packet_ts)),
-                        AudioBufferRef::S32(buf) => DecodeRefResult::DecodedOwned(DecodedBufferAndTimestamp::S32(buf.into_owned(), packet_ts)),
-                        AudioBufferRef::F32(buf) => DecodeRefResult::DecodedOwned(DecodedBufferAndTimestamp::F32(buf.into_owned(), packet_ts)),
-                        AudioBufferRef::F64(buf) => DecodeRefResult::DecodedOwned(DecodedBufferAndTimestamp::F64(buf.into_owned(), packet_ts)),
-                        _ => {
-                             error!(target: LOG_TARGET, "Unsupported AudioBufferRef variant encountered during decode.");
-                             // Restore ownership before returning error
-                             self.format_reader = Some(format_reader);
-                             self.decoder = Some(decoder);
-                             return Err(AudioError::UnsupportedFormat("Unsupported AudioBufferRef variant".to_string()));
+                // Return decoder ownership along with the *owned* result
+                (decoder, owned_result)
+            });
+
+            // Select between shutdown and the decode future completing
+            // Select between shutdown and the decode future completing
+            // Poll decode_future by mutable reference (&mut) to retain ownership
+            let decode_result_from_task: Result<DecodedBufferAndTimestamp, SymphoniaError> = tokio::select! {
+                biased; // Prioritize shutdown check
+                _ = shutdown_rx.recv() => {
+                    info!(target: LOG_TARGET, "Shutdown signal received during decode wait.");
+                    // Abort the decode future as we are shutting down (safe now as we poll by ref)
+                    decode_future.abort();
+                    // Restore format_reader ownership before returning
+                    self.format_reader = Some(format_reader);
+                    // Decoder ownership is lost as the task was aborted. Mark as None.
+                    self.decoder = None; // Decoder is inside the aborted task
+                    trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning DecodeRefResult::Shutdown (during decode wait)");
+                    return Ok(DecodeRefResult::Shutdown);
+                }
+                join_result = &mut decode_future => { // Poll by mutable reference
+                    match join_result {
+                        // Task completed, return the inner result (Ok(owned_buffer) or Err(SymphoniaError))
+                        Ok((ret_decoder, owned_decode_res)) => {
+                            decoder = ret_decoder; // Regain ownership of decoder
+                            owned_decode_res // This is the Result<DecodedBufferAndTimestamp, SymphoniaError>
                         }
-                    };
+                        // Task panicked
+                        Err(join_error) => {
+                            error!(target: LOG_TARGET, "Spawn blocking task for decode failed: {}", join_error);
+                            // Restore format_reader ownership, decoder is lost
+                            self.format_reader = Some(format_reader);
+                            self.decoder = None;
+                            trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning Err(TaskJoinError) (decode task panic)");
+                            return Err(AudioError::TaskJoinError(join_error.to_string()));
+                        }
+                    }
+                }
+            };
 
+            // --- Process Decode Result ---
+            // --- Process Decode Result (which is now Result<DecodedBufferAndTimestamp, SymphoniaError>) ---
+            match decode_result_from_task {
+                 // Successfully decoded and converted to owned buffer
+                 Ok(owned_buffer_ts) => {
                     // Restore ownership before returning success
                     self.format_reader = Some(format_reader);
                     self.decoder = Some(decoder);
 
-                    // Return the owned buffer variant
+                    // Return the owned buffer variant wrapped in DecodeRefResult
                     trace!(target: LOG_TARGET, "decode_next_frame_owned: Returning DecodeRefResult::DecodedOwned(...)");
-                    return Ok(owned_decoded_buffer);
+                    return Ok(DecodeRefResult::DecodedOwned(owned_buffer_ts));
                 }
+                // Specific Symphonia decode error (recoverable by skipping packet)
                 Err(SymphoniaError::DecodeError(err)) => {
                     warn!(target: LOG_TARGET, "Symphonia decode error (skipping packet): {}", err);
-                    // Continue decoding next packet
+                    // Continue loop to try next packet
                 }
-                Err(e) => { // Other decoder errors
-                    error!(target: LOG_TARGET, "Unexpected decoder error: {}", e);
-                    // Restore ownership before returning error
+                 // Specific Symphonia unsupported error from conversion inside spawn_blocking
+                 Err(SymphoniaError::Unsupported(err_str)) => {
+                     error!(target: LOG_TARGET, "Unsupported format during decode/conversion: {}", err_str);
+                     self.format_reader = Some(format_reader);
+                     self.decoder = Some(decoder);
+                     return Err(AudioError::UnsupportedFormat(err_str.to_string()));
+                 }
+                // Other Symphonia errors (treat as fatal for this operation)
+                Err(e) => {
+                    error!(target: LOG_TARGET, "Unexpected Symphonia error during decode: {}", e);
                     self.format_reader = Some(format_reader);
                     self.decoder = Some(decoder);
-                    trace!(target: LOG_TARGET, "decode_next_frame: Returning Err({:?}) (Unexpected decoder error)", e);
-                    return Err(e.into());
+                    trace!(target: LOG_TARGET, "decode_next_frame: Returning Err({:?}) (Unexpected Symphonia error)", e);
+                    return Err(e.into()); // Convert SymphoniaError to AudioError
                 }
             }
         } // end loop

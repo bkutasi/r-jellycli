@@ -8,19 +8,18 @@ use futures::{SinkExt, StreamExt};
 use tracing::{debug, error, info, trace, warn}; // Replaced log with tracing
 use serde::{Deserialize, Serialize};
 // Removed unused imports: AtomicBool, Ordering
-use std::sync::Arc;
+// Removed unused import: use std::sync::Arc;
 use std::time::Duration;
-use tokio::{net::TcpStream, sync::{broadcast, mpsc, Mutex}}; // Combine imports
+use tokio::{net::TcpStream, sync::{broadcast, mpsc}}; // Removed Mutex import
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
 use crate::jellyfin::api::JellyfinClient;
-use crate::jellyfin::models::MediaItem;
-// Removed unused import: use crate::jellyfin::models_playback::*;
-use crate::player::Player;
+// Import the internal player types
+use crate::player::{InternalPlayerStateUpdate, PlayerCommand};
 
-use super::ws_incoming_handler; // Import the new handler module
+use super::ws_incoming_handler; // Import the incoming handler module
 
 // --- WebSocket Message Structs (Incoming & Outgoing) ---
 
@@ -43,34 +42,7 @@ pub struct OutgoingWsMessage<T> {
     pub data: T,
 }
 
-// --- Player State Update Channel ---
-
-/// Enum representing different states or events reported by the Player.
-/// These are sent over an MPSC channel to the WebSocket handler.
-#[derive(Debug, Clone)]
-pub enum PlayerStateUpdate {
-    /// Playback started for a specific item.
-    Started { item: MediaItem },
-    /// Playback stopped for a specific item.
-    Stopped {
-        item_id: String,
-        final_position_ticks: i64,
-    },
-    /// Playback progress update. Includes essential state for reporting.
-    Progress {
-        item_id: String,
-        position_ticks: i64,
-        is_paused: bool,
-        volume: i32,
-        is_muted: bool,
-    },
-    /// Volume or mute status changed.
-    VolumeChanged {
-        volume: i32,
-        is_muted: bool,
-    },
-    // TODO: Add other states if needed (e.g., QueueChanged, Error)
-}
+// PlayerStateUpdate enum removed, using InternalPlayerStateUpdate from player.rs now.
 
 // --- WebSocket Handler Setup ---
 
@@ -79,10 +51,10 @@ pub struct WebSocketHandler {
     server_url: String,
     api_key: String,
     device_id: String,
-    jellyfin_client: JellyfinClient,
-    player: Option<Arc<Mutex<Player>>>,
+    // jellyfin_client: JellyfinClient, // Removed - Unused field
+    // player: Option<Arc<Mutex<Player>>>, // Remove direct player access
     ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    player_update_tx: Option<mpsc::UnboundedSender<PlayerStateUpdate>>,
+    // player_update_tx: Option<mpsc::UnboundedSender<PlayerStateUpdate>>, // Remove MPSC sender
     shutdown_tx: broadcast::Sender<()>, // Add shutdown sender
     // session_id is not used for the initial connection based on jellycli behavior
     // session_id: Option<String>,
@@ -91,7 +63,7 @@ pub struct WebSocketHandler {
 impl WebSocketHandler {
     /// Creates a new WebSocketHandler instance.
     pub fn new(
-        jellyfin_client: JellyfinClient,
+        _jellyfin_client: JellyfinClient, // Parameter kept for signature compatibility if needed, but marked unused
         server_url: &str,
         api_key: &str,
         device_id: &str,
@@ -101,12 +73,11 @@ impl WebSocketHandler {
             server_url: server_url.trim_end_matches('/').to_string(), // Ensure no trailing slash
             api_key: api_key.to_string(),
             device_id: device_id.to_string(),
-            jellyfin_client,
-            player: None,
+            // jellyfin_client, // Removed initialization
+            // player: None, // Removed
             ws_stream: None,
-            player_update_tx: None,
+            // player_update_tx: None, // Removed
             shutdown_tx, // Store the sender
-            // session_id: None,
         }
     }
 
@@ -115,37 +86,11 @@ impl WebSocketHandler {
     //     self
     // }
 
-    /// Sets the Player instance for the handler.
-    /// If the update channel sender exists, it attempts to update the player instance.
-    pub fn set_player(&mut self, player: Arc<Mutex<Player>>) {
-        self.player = Some(player.clone());
-        debug!("[WS Handler] Player instance set.");
-        // If the channel sender already exists, update the player instance
-        if let Some(tx) = &self.player_update_tx {
-            let tx_clone = tx.clone();
-            // Spawn a task to avoid blocking while holding the handler's lock
-            tokio::spawn(async move {
-                let mut player_guard = player.lock().await;
-                // Assume Player has a method like `set_update_sender`
-                player_guard.set_update_sender(tx_clone);
-                debug!("[WS Handler] Updated player instance with state update sender.");
-            });
-        } else {
-            debug!("[WS Handler] Player set, but update sender not yet available (will be set during prepare).");
-        }
-    }
+    // Removed set_player method as direct player access is removed.
+    // The player command sender and state receiver are passed during setup/preparation.
 
-    /// Checks if the Player instance has been set.
-    pub fn is_player_set(&self) -> bool {
-        self.player.is_some()
-    }
-
-    /// Sets the sender part of the MPSC channel for player state updates.
-    /// This is typically called internally during `prepare_for_listening`.
-    fn set_player_update_tx(&mut self, tx: mpsc::UnboundedSender<PlayerStateUpdate>) {
-        self.player_update_tx = Some(tx);
-        debug!("[WS Handler] Player update channel sender set.");
-    }
+    // Removed is_player_set method.
+    // Removed set_player_update_tx method.
 
     /// Establishes the WebSocket connection to the Jellyfin server.
     #[instrument(skip(self), fields(device_id = %self.device_id))]
@@ -204,12 +149,13 @@ impl WebSocketHandler {
     }
 
 
-    /// Prepares the handler for the listening loop by creating the MPSC channel
-    /// and returning a `PreparedWebSocketHandler` which owns the stream and channel receiver.
+    /// Prepares the handler for the listening loop.
+    /// Takes ownership of the WebSocket stream and requires the necessary channels.
     pub fn prepare_for_listening(
         &mut self,
-        // Change signature to accept broadcast::Receiver
-        shutdown_rx: broadcast::Receiver<()>,
+        player_command_tx: mpsc::Sender<PlayerCommand>, // Sender for commands TO player
+        player_state_rx: broadcast::Receiver<InternalPlayerStateUpdate>, // Receiver for state FROM player
+        shutdown_rx: broadcast::Receiver<()>, // Receiver for app shutdown
     ) -> Option<PreparedWebSocketHandler> {
         let ws_stream = match self.ws_stream.take() {
             Some(stream) => stream,
@@ -219,31 +165,17 @@ impl WebSocketHandler {
             }
         };
 
-        // Create the MPSC channel for player state updates
-        let (tx, rx) = mpsc::unbounded_channel::<PlayerStateUpdate>();
-        self.set_player_update_tx(tx.clone()); // Store the sender
-
-        // If player instance already exists, update its sender immediately
-        if let Some(player_arc) = &self.player {
-            let player_clone: Arc<Mutex<Player>> = Arc::clone(player_arc); // <<< Added type annotation here
-            // Spawn task to update the player instance asynchronously
-            tokio::spawn(async move {
-                let mut player_guard = player_clone.lock().await;
-                player_guard.set_update_sender(tx); // Pass the sender directly
-                debug!("[WS Prepare] Updated existing player instance with sender.");
-            });
-        } else {
-            debug!("[WS Prepare] Player instance not set yet; sender stored for later use.");
-        }
+        // MPSC channel creation removed. State updates come via broadcast receiver.
 
         debug!("[WS Prepare] Prepared for listening. Handing over stream and receiver.");
         Some(PreparedWebSocketHandler {
             websocket: ws_stream,
-            player: self.player.clone(), // Clone Arc<Mutex<Player>>
-            shutdown_rx, // Store the receiver
-            jellyfin_client: self.jellyfin_client.clone(),
-            player_update_rx: rx, // Pass the receiver
-            shutdown_tx: self.shutdown_tx.clone(), // Pass the shutdown sender clone
+            // player: self.player.clone(), // Removed direct player access
+            player_command_tx, // Store command sender
+            shutdown_rx, // Store shutdown receiver
+            // jellyfin_client: self.jellyfin_client.clone(), // Removed - no longer needed here
+            player_state_rx, // Store state update receiver
+            shutdown_tx: self.shutdown_tx.clone(), // Store shutdown sender clone
         })
 
     }
@@ -255,12 +187,13 @@ impl WebSocketHandler {
 /// and sending outgoing state updates. Owns the WebSocket stream and MPSC receiver.
 pub struct PreparedWebSocketHandler {
     websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    player: Option<Arc<Mutex<Player>>>, // Keep Arc<Mutex<Player>> for state access
-    // Replace AtomicBool with broadcast::Receiver
-    shutdown_rx: broadcast::Receiver<()>,
-    jellyfin_client: JellyfinClient,
-    player_update_rx: mpsc::UnboundedReceiver<PlayerStateUpdate>,
-    shutdown_tx: broadcast::Sender<()>, // Add shutdown sender field
+    // player: Option<Arc<Mutex<Player>>>, // Removed direct player access
+    player_command_tx: mpsc::Sender<PlayerCommand>, // Sender for commands TO player
+    shutdown_rx: broadcast::Receiver<()>, // Receiver for app shutdown
+    // jellyfin_client: JellyfinClient, // Removed - no longer needed here
+    player_state_rx: broadcast::Receiver<InternalPlayerStateUpdate>, // Receiver for state FROM player
+    #[allow(dead_code)] // TODO: Remove allow when shutdown logic is fully implemented
+    shutdown_tx: broadcast::Sender<()>, // Sender for app shutdown (used by incoming handler)
 }
 
 impl PreparedWebSocketHandler {
@@ -302,17 +235,24 @@ impl PreparedWebSocketHandler {
                     }
                 },
 
-                // --- Branch 2: Player State Update from Player ---
-                maybe_update = self.player_update_rx.recv() => {
-                    trace!("[WS Listen] select! resolved: player_update_rx.recv()");
-                    if let Some(update) = maybe_update {
-                        if let Err(e) = self.process_player_update(update).await {
-                             error!("[WS Listen] Failed to process player update and send WS message: {}", e);
-                             // Decide if this error is fatal. Continuing for now.
+                // --- Branch 2: Player State Update from Player (Broadcast Receiver) ---
+                update_result = self.player_state_rx.recv() => {
+                    trace!("[WS Listen] select! resolved: player_state_rx.recv()");
+                    match update_result {
+                        Ok(update) => {
+                            if let Err(e) = self.process_player_update(update).await {
+                                error!("[WS Listen] Failed to process player update: {}", e);
+                                // Decide if this error is fatal. Continuing for now.
+                            }
                         }
-                    } else {
-                        info!("Player update channel closed. Exiting loop.");
-                        break; // Exit if the sender side is dropped
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("[WS Listen] Player state update receiver lagged by {} messages. Some state changes might have been missed.", n);
+                            // Continue listening, but log the lag.
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!("Player state update channel closed. Exiting loop.");
+                            break; // Exit if the sender side is dropped
+                        }
                     }
                 },
 
@@ -392,16 +332,10 @@ impl PreparedWebSocketHandler {
         Ok(true) // Continue listening
     }
 
-    /// Handles a successfully parsed `WebSocketMessage`.
-    async fn handle_parsed_message(&mut self, message: WebSocketMessage) { // Make self mutable for shutdown_tx
+    /// Handles a successfully parsed `WebSocketMessage` by translating it to a PlayerCommand.
+    async fn handle_parsed_message(&mut self, message: WebSocketMessage) {
         trace!("[WS Handle] Handling parsed message type: {}", message.message_type);
-        let player_arc = match &self.player {
-            Some(p) => p.clone(),
-            None => {
-                warn!("[WS Handle] Cannot handle '{}': Player instance not available.", message.message_type);
-                return;
-            }
-        };
+        // No longer need direct player access here. Commands are sent via channel.
 
         match message.message_type.as_str() {
             "ForceKeepAlive" | "KeepAlive" => {
@@ -412,7 +346,8 @@ impl PreparedWebSocketHandler {
             "GeneralCommand" => {
                 if let Some(data) = message.data {
                     match serde_json::from_value::<GeneralCommand>(data) {
-                        Ok(cmd) => ws_incoming_handler::handle_general_command(cmd, player_arc).await,
+                        // Pass the command sender to the handler
+                        Ok(cmd) => ws_incoming_handler::handle_general_command(cmd, &self.player_command_tx).await,
                         Err(e) => error!("[WS Handle] Failed to parse GeneralCommand data: {}", e),
                     }
                 } else { warn!("[WS Handle] GeneralCommand message missing 'Data'."); }
@@ -420,8 +355,8 @@ impl PreparedWebSocketHandler {
             "PlayState" | "Playstate" => { // Handle both potential casings
                 if let Some(data) = message.data {
                      match serde_json::from_value::<PlayStateCommand>(data) {
-                        // Pass the shutdown sender to the handler
-                        Ok(cmd) => ws_incoming_handler::handle_playstate_command(cmd, player_arc, &self.shutdown_tx).await,
+                        // Pass the command sender to the handler
+                        Ok(cmd) => ws_incoming_handler::handle_playstate_command(cmd, &self.player_command_tx).await,
                         Err(e) => error!("[WS Handle] Failed to parse PlayStateCommand data: {}", e),
                     }
                 } else { warn!("[WS Handle] PlayState message missing 'Data'."); }
@@ -429,7 +364,9 @@ impl PreparedWebSocketHandler {
             "Play" => {
                 if let Some(data) = message.data {
                      match serde_json::from_value::<PlayCommand>(data) {
-                        Ok(cmd) => ws_incoming_handler::handle_play_command(cmd, player_arc, &self.jellyfin_client).await,
+                        // Pass the command sender and temporarily the client/player for item fetching
+                        // jellyfin_client argument removed as fetching is now done in Player task
+                        Ok(cmd) => ws_incoming_handler::handle_play_command(cmd, &self.player_command_tx).await,
                         Err(e) => error!("[WS Handle] Failed to parse PlayCommand data: {}", e),
                     }
                 } else { warn!("[WS Handle] Play message missing 'Data'."); }
@@ -458,41 +395,67 @@ impl PreparedWebSocketHandler {
     }
 
 
-    /// Processes a `PlayerStateUpdate` received from the MPSC channel and sends the corresponding message over WebSocket.
-    async fn process_player_update(&mut self, update: PlayerStateUpdate) -> Result<(), Box<dyn std::error::Error>> {
+    /// Processes an `InternalPlayerStateUpdate` received from the broadcast channel.
+    /// Sends corresponding messages over WebSocket if applicable (most state is reported via HTTP POST now).
+    async fn process_player_update(&mut self, update: InternalPlayerStateUpdate) -> Result<(), Box<dyn std::error::Error>> {
         debug!("[WS Update] Processing player state update: {:?}", update);
 
-        // Lock will be acquired inside the match arms where needed
+        // Most state updates (Start, Stop, Progress, Volume) are reported via HTTP POST by the Player task.
+        // This handler primarily needs to react to state changes that might require *sending* a specific
+        // WebSocket message *from* the client to the server, if any exist.
+        // Based on common Jellyfin client behavior, most actions are client-initiated or reported via POST.
+        // We might send `UserDataChanged` on volume change, or `QueueChanged` if the queue structure changes.
 
         match update {
-            PlayerStateUpdate::Started { item } => {
-                // PlaybackStart is now reported via HTTP POST in Player::play_current_queue_item
-                debug!("[WS Update] Received PlayerStateUpdate::Started for item {}. (Reporting handled via HTTP POST)", item.id);
-                // No WebSocket message needed here anymore.
+            InternalPlayerStateUpdate::Playing { item, .. } => {
+                debug!("[WS Update] State: Playing item {}", item.id);
+                // Reporting handled via HTTP POST by Player.
             }
-            PlayerStateUpdate::Stopped { item_id, final_position_ticks: _ } => { // Ignore unused field
-                // PlaybackStopped is now reported via HTTP POST in Player::stop
-                debug!("[WS Update] Received PlayerStateUpdate::Stopped for item {}. (Reporting handled via HTTP POST)", item_id);
-                // No WebSocket message needed here anymore.
+            InternalPlayerStateUpdate::Paused { item, .. } => {
+                debug!("[WS Update] State: Paused item {}", item.id);
+                // Reporting handled via HTTP POST by Player.
             }
-            PlayerStateUpdate::Progress { item_id, position_ticks: _, .. } => { // Ignore unused field
-                 // PlaybackProgress is now reported via HTTP POST by the reporter task in Player::play_current_queue_item
-                 trace!("[WS Update] Received PlayerStateUpdate::Progress for item {}. (Reporting handled via HTTP POST)", item_id);
-                 // No WebSocket message needed here anymore.
+            InternalPlayerStateUpdate::Stopped => {
+                debug!("[WS Update] State: Stopped");
+                // Reporting handled via HTTP POST by Player.
             }
-            PlayerStateUpdate::VolumeChanged { volume, is_muted } => {
-                // Volume/Mute changes are implicitly included in the periodic Progress updates.
-                // We could optionally send an immediate UserDataChanged message here if needed,
-                // but for now, just log it.
-                debug!("[WS Update] Received VolumeChanged event (vol: {}, muted: {}). State will be reflected in next Progress report.", volume, is_muted);
+            InternalPlayerStateUpdate::Progress { item_id, .. } => {
+                trace!("[WS Update] State: Progress for item {}", item_id);
+                // Reporting handled via HTTP POST by Player.
             }
-            // Add other PlayerStateUpdate arms if necessary (e.g., Seek, etc.)
-            // _ => { // Handle other potential states if they exist
-            //     trace!("[WS Update] Received unhandled PlayerStateUpdate variant: {:?}", update); // Match on outer `update`
-            // }
-        } // Close match update
-        // Removed misplaced code block and extra closing brace from previous refactoring attempt.
+            InternalPlayerStateUpdate::QueueChanged { queue_ids, current_index } => {
+                debug!("[WS Update] State: QueueChanged ({} items, index {})", queue_ids.len(), current_index);
+                // TODO: Does Jellyfin WS require a specific message for queue changes initiated by the client?
+                // If so, construct and send it here. Example (replace with actual message if needed):
+                // let queue_data = ...; // Format queue data
+                // let msg = OutgoingWsMessage { message_type: "QueueChanged".to_string(), data: queue_data };
+                // self.send_ws_message(&msg).await?;
+            }
+            // InternalPlayerStateUpdate::VolumeChanged removed as the variant no longer exists
+             InternalPlayerStateUpdate::Error(err_msg) => {
+                 error!("[WS Update] Received player error state: {}", err_msg);
+                 // Optionally send an error notification via WS if the protocol supports it.
+            }
+        }
         Ok(())
+    }
+
+    /// Helper to serialize and send an OutgoingWsMessage.
+    /// Helper to serialize and send an OutgoingWsMessage.
+    #[allow(dead_code)] // TODO: Remove allow when messages are sent from here
+    async fn send_ws_message<T: Serialize + std::fmt::Debug>(&mut self, message: &OutgoingWsMessage<T>) -> Result<(), Box<dyn std::error::Error>> {
+        match serde_json::to_string(message) {
+            Ok(json_payload) => {
+                debug!("[WS Send] Sending message: Type='{}'", message.message_type);
+                trace!("[WS Send] Payload: {}", json_payload);
+                self.websocket.send(Message::Text(json_payload)).await?;
+                Ok(())
+            }
+            Err(e) => {
+                error!("[WS Send] Failed to serialize outgoing message ({:?}): {}", message, e);
+                Err(Box::new(e)) // Propagate serialization error
+            }
+        }
     }
 
     // Removed unused send_ws_message function (likely obsolete after reporting moved to HTTP)

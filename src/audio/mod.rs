@@ -8,6 +8,7 @@ pub mod format_converter;
 pub mod playback; // Keep the main playback orchestrator module
 pub mod progress;
 pub mod stream_wrapper;
+pub mod sample_converter;
 
 // Re-export key types for easier access from outside `audio` module
 pub use error::AudioError;

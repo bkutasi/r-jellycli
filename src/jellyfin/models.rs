@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Represents a media item in a Jellyfin library
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)] // Added PartialEq
 pub struct MediaItem {
     #[serde(rename = "Id")]
     pub id: String,

@@ -36,12 +36,29 @@ impl AlsaPcmHandler {
     pub fn initialize(&mut self, spec: SignalSpec) -> Result<(), AudioError> {
         info!(
             target: LOG_TARGET,
-            "Initializing ALSA PCM device '{}' with spec: rate={}, channels={}",
+            "Initializing ALSA PCM device '{}' for spec: rate={}, channels={}",
             self.device_name, spec.rate, spec.channels.count()
         );
 
-        self.close(); // Ensure any existing PCM is closed first
+        // Check if PCM exists and if spec matches
+        if let Some(existing_spec) = &self.requested_spec {
+            if self.pcm.is_some() && existing_spec.rate == spec.rate && existing_spec.channels == spec.channels {
+                debug!(target: LOG_TARGET, "PCM exists and spec matches. Preparing for new stream.");
+                return self.prepare_for_new_stream();
+            } else {
+                debug!(target: LOG_TARGET, "PCM exists but spec differs or PCM is None. Re-opening device.");
+                self.close_internal(); // Close existing PCM before opening new one
+            }
+        } else {
+             debug!(target: LOG_TARGET, "No existing PCM or spec found. Opening new device.");
+             // Ensure PCM is None if spec is None
+             if self.pcm.is_some() {
+                 warn!(target: LOG_TARGET, "PCM existed but requested_spec was None. Closing inconsistent PCM.");
+                 self.close_internal();
+             }
+        }
 
+        // Proceed with opening a new PCM device
         let device = CString::new(self.device_name.clone())
             .map_err(|e| AudioError::InitializationError(format!("Invalid device name: {}", e)))?;
 
@@ -234,23 +251,66 @@ impl AlsaPcmHandler {
 
 
 
-    /// Closes the ALSA PCM device if it's open, attempting to drain first.
-    pub fn close(&mut self) {
-        if let Some(pcm) = self.pcm.take() { // Take ownership to drop
-            debug!(target: LOG_TARGET, "Closing ALSA PCM device (state: {:?})...", pcm.state());
-            // Attempt drain, but ignore errors during close as we are shutting down anyway.
-            if pcm.state() == PcmState::Running || pcm.state() == PcmState::Prepared {
-                debug!(target: LOG_TARGET, "Dropping ALSA PCM stream immediately during close.");
-                match pcm.drop() { // Use drop() for immediate stop instead of drain()
-                    Ok(_) => debug!(target: LOG_TARGET, "ALSA drop successful during close."),
-                    Err(e) => warn!(target: LOG_TARGET, "Error dropping ALSA buffer during close (ignored): {}", e),
+    /// Prepares the existing ALSA stream for a new track (stops current, prepares).
+    /// Assumes the PCM device exists and the format is compatible.
+    #[instrument(skip(self))]
+    fn prepare_for_new_stream(&mut self) -> Result<(), AudioError> {
+        if let Some(pcm) = &self.pcm {
+            debug!(target: LOG_TARGET, "Preparing ALSA PCM for new stream (current state: {:?}).", pcm.state());
+            // 1. Stop playback immediately (drop any pending data)
+            match pcm.drop() {
+                Ok(_) => debug!(target: LOG_TARGET, "ALSA drop successful during prepare."),
+                Err(e) if e.errno() == Errno::EBADFD => {
+                    // This can happen if the stream was already stopped or in a bad state.
+                    // Often okay when preparing for a new track.
+                    warn!(target: LOG_TARGET, "ALSA drop failed with EBADFD during prepare (likely already stopped/closed, ignored): {}", e);
                 }
-                self.actual_rate = None; // Clear actual rate
+                Err(e) => {
+                    error!(target: LOG_TARGET, "Error dropping ALSA buffer during prepare: {}", e);
+                    return Err(e.into());
+                }
             }
-            // PCM is dropped here, closing the device
-            debug!(target: LOG_TARGET, "ALSA PCM closed.");
+            // 2. Prepare the stream for new data
+            match pcm.prepare() {
+                Ok(_) => {
+                    debug!(target: LOG_TARGET, "ALSA prepare successful.");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!(target: LOG_TARGET, "Error preparing ALSA stream: {}", e);
+                    Err(e.into())
+                }
+            }
+        } else {
+            error!(target: LOG_TARGET, "prepare_for_new_stream called but PCM does not exist.");
+            Err(AudioError::InvalidState("PCM not initialized for prepare_for_new_stream".to_string()))
+        }
+    }
+
+    /// Internal method to actually close and drop the ALSA PCM device.
+    fn close_internal(&mut self) {
+         if let Some(pcm) = self.pcm.take() { // Take ownership to drop
+            debug!(target: LOG_TARGET, "Closing and dropping ALSA PCM device (state: {:?})...", pcm.state());
+            // Attempt immediate stop via drop(), ignore errors as we are closing.
+            if pcm.state() == PcmState::Running || pcm.state() == PcmState::Prepared || pcm.state() == PcmState::Suspended || pcm.state() == PcmState::Paused {
+                 match pcm.drop() {
+                    Ok(_) => debug!(target: LOG_TARGET, "ALSA drop successful during internal close."),
+                    Err(e) => warn!(target: LOG_TARGET, "Error dropping ALSA buffer during internal close (ignored): {}", e),
+                }
+            }
+            // PCM object is dropped here when it goes out of scope, triggering snd_pcm_close()
+            debug!(target: LOG_TARGET, "ALSA PCM object dropped.");
         }
         self.requested_spec = None; // Clear stored spec
+        self.actual_rate = None; // Clear actual rate
+    }
+
+
+    /// Shuts down the ALSA PCM device completely. Should be called before dropping the handler.
+    /// This is the method that triggers the potentially blocking snd_pcm_close.
+    pub fn shutdown_device(&mut self) {
+        debug!(target: LOG_TARGET, "Executing shutdown_device...");
+        self.close_internal();
     }
 
     /// Returns the current state of the PCM device.
@@ -273,8 +333,8 @@ impl AlsaPcmHandler {
 
 impl Drop for AlsaPcmHandler {
     fn drop(&mut self) {
-        // Ensure resources are released when the handler goes out of scope
-        debug!(target: LOG_TARGET, "Dropping AlsaPcmHandler.");
-        self.close();
+        // Ensure resources are released when the handler goes out of scope by calling shutdown.
+        debug!(target: LOG_TARGET, "Dropping AlsaPcmHandler. Calling shutdown_device().");
+        self.shutdown_device();
     }
 }
