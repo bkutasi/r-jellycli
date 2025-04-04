@@ -98,10 +98,12 @@ impl SessionManager {
             device_profile: Some(serde_json::json!({
                 "Name": "r-jellycli Audio Player",
             })),
+            app_store_url: None, // No app store link
+            icon_url: None, // No specific icon URL
         };
 
         // Log the JSON being sent using debug level
-        debug!("Sending capabilities JSON payload:\n{}",
+        debug!("[SESSION] Sending capabilities JSON payload:\n{}",
             serde_json::to_string_pretty(&capabilities_payload).unwrap_or_else(|e| format!("<JSON serialization error: {}>", e))
         );
 
