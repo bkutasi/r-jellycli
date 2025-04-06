@@ -15,11 +15,11 @@ mod audio_integration_tests {
     #[tokio::test]
     #[ignore]
     async fn test_audio_streaming() -> Result<(), Box<dyn Error>> {
-        let test_url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+        let _test_url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"; // Prefixed as unused
         
-        let mut player = PlaybackOrchestrator::new("default");
+        let _player = PlaybackOrchestrator::new("default"); // Prefixed as unused, removed mut
 
-        let (_shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1); // Add type annotation and mut
+        let (_shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1); // Prefixed shutdown_rx as unused, removed mut
         
         // player.stream_decode_and_play(test_url, None, shutdown_rx).await?; // Commented out due to E0599
         

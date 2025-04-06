@@ -34,7 +34,8 @@ mod tests {
     #[test]
     fn test_get_stream_url() {
         let client = JellyfinClient::new("http://localhost:8096")
-            .with_api_key("test_api_key");
+            .with_api_key("test_api_key")
+            .with_user_id("test_user_id"); // Add user ID for stream URL generation
         let url = client.get_stream_url("item123").unwrap();
         assert_eq!(url, "http://localhost:8096/Audio/item123/stream?static=true&api_key=test_api_key");
     }

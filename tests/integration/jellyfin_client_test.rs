@@ -33,7 +33,8 @@ mod jellyfin_integration_tests {
     #[test]
     fn test_stream_url_generation() {
         let client = JellyfinClient::new("https://test-server.com")
-            .with_api_key("test-api-key");
+            .with_api_key("test-api-key")
+            .with_user_id("test-user-id"); // Add user ID for stream URL generation
             
         let url = client.get_stream_url("item123").unwrap();
         assert_eq!(url, "https://test-server.com/Audio/item123/stream?static=true&api_key=test-api-key");

@@ -5,3 +5,4 @@
 pub mod jellyfin_client_test;
 pub mod config_test;
 pub mod audio_test;
+pub mod jellyfin_api_sequence_test;
