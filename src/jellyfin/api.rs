@@ -5,7 +5,7 @@ use crate::player::{PlayerCommand, InternalPlayerStateUpdate};
 use crate::jellyfin::{PlaybackStartReport, PlaybackProgressReport, PlaybackStopReport, CapabilitiesReport};
 use serde::Serialize;
 
-use serde_json::json;
+// Removed unused import: use serde_json::json;
 
 const API_LOG_TARGET: &str = "r_jellycli::jellyfin::api";
 use tracing::{debug, info, warn, error, trace};
@@ -13,8 +13,9 @@ use tracing::instrument;
 use crate::jellyfin::models::{ItemsResponse, MediaItem, AuthResponse};
 use crate::jellyfin::session::SessionManager;
 use crate::jellyfin::WebSocketHandler;
-use reqwest::{Client, Error as ReqwestError, Response, StatusCode};
+use reqwest::{Client, Error as ReqwestError, Response, StatusCode, header}; // Added header
 use serde::de::DeserializeOwned;
+use hostname; // Added hostname
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -92,7 +93,9 @@ pub trait JellyfinApiContract: Send + Sync {
     async fn report_playback_stopped(&self, report: &PlaybackStopReport) -> Result<(), JellyfinError>;
     async fn report_playback_progress(&self, report: &PlaybackProgressReport) -> Result<(), JellyfinError>;
     fn play_session_id(&self) -> &str;
-    async fn report_capabilities(&self, report: &CapabilitiesReport) -> Result<(), JellyfinError>;
+    // Trait definition already updated in previous attempt, no change needed here if it succeeded.
+    // Assuming it's correct: async fn report_capabilities(&self, device_id: &str, report: &CapabilitiesReport) -> Result<(), JellyfinError>;
+    async fn report_capabilities(&self, device_id: &str, report: &CapabilitiesReport) -> Result<(), JellyfinError>;
 }
 
 // --- JellyfinClient Implementation ---
@@ -238,6 +241,7 @@ impl JellyfinClient {
             }
         }
     }
+
     /// Handles response status checking and JSON deserialization.
     async fn _handle_response<T: DeserializeOwned>(response: Response) -> Result<T, JellyfinError> {
         let status = response.status();
@@ -356,10 +360,26 @@ impl JellyfinClient {
         // Removed unused device_name variable based on CapabilitiesReport changes
 
         let capabilities = CapabilitiesReport {
+            // Supported capabilities at /Sessions/Capabilities/Full are: 
+            // [ MoveUp, MoveDown, MoveLeft, MoveRight, PageUp, PageDown, PreviousLetter, 
+            // NextLetter, ToggleOsd, ToggleContextMenu, Select, Back, TakeScreenshot, 
+            // SendKey, SendString, GoHome, GoToSettings, VolumeUp, VolumeDown, Mute, Unmute, 
+            // ToggleMute, SetVolume, SetAudioStreamIndex, SetSubtitleStreamIndex, 
+            // ToggleFullscreen, DisplayContent, GoToSearch, DisplayMessage, SetRepeatMode, 
+            // ChannelUp, ChannelDown, Guide, ToggleStats, PlayMediaSource, PlayTrailers, 
+            // SetShuffleQueue, PlayState, PlayNext, ToggleOsdMenu, Play, SetMaxStreamingBitrate, SetPlaybackOrder ]
             playable_media_types: vec!["Audio".to_string()],
             supported_commands: vec![
-                "PlayNow".to_string(), 
-                "PlayPause".to_string(),
+                // Use ONLY the commands from the working commit 9396c7ed
+                "PlayState".to_string(),
+                "Play".to_string(),
+                "VolumeUp".to_string(),
+                "VolumeDown".to_string(),
+                "ToggleMute".to_string(),
+                "SetVolume".to_string(),
+                "SetShuffleQueue".to_string(),
+                "SetRepeatMode".to_string(),
+                "PlayNext".to_string(),
             ],
             supports_media_control: true,
             supports_persistent_identifier: false,
@@ -368,7 +388,8 @@ impl JellyfinClient {
             icon_url: None, // Added based on updated spec
             // Removed queueable_media_types, application_version, client, device_name, device_id
         };
-        self.report_capabilities(&capabilities).await?;
+        // Pass the correct device_id to report_capabilities
+        self.report_capabilities(device_id, &capabilities).await?;
 
         // Keep SessionManager for potential future use, but it's not used for capability reporting now.
         self.session_manager = Some(session_manager);
@@ -391,6 +412,19 @@ impl JellyfinClient {
         debug!("Successfully fetched {} root items", response.items.len());
         Ok(response.items)
     }
+
+    /// Get root items for the user (e.g., libraries shown on the home screen)
+    #[instrument(skip(self))]
+    pub async fn get_root_items(&self) -> Result<Vec<MediaItem>, JellyfinError> {
+        debug!("Fetching user's root items");
+        let (_, user_id) = self.ensure_authenticated()?;
+        let path = format!("/Users/{}/Items", user_id);
+        // No ParentId query parameter needed for root items
+        let response: ItemsResponse = self._get_json(&path, None).await?;
+        debug!("Successfully fetched {} root items", response.items.len());
+        Ok(response.items)
+    }
+
 
     /// Get child items of a folder/collection
     #[instrument(skip(self), fields(parent_id))]
@@ -460,10 +494,68 @@ impl JellyfinClient {
     }
 
     /// Report client capabilities to Jellyfin server via HTTP POST.
-    #[instrument(skip(self, report))]
-    pub async fn report_capabilities(&self, report: &CapabilitiesReport) -> Result<(), JellyfinError> {
-        info!("Reporting client capabilities");
-        self._post_json_no_content("/Sessions/Capabilities/Full", &json!({"capabilities": report})).await
+    #[instrument(skip(self, report), fields(device_id))]
+    pub async fn report_capabilities(&self, device_id: &str, report: &CapabilitiesReport) -> Result<(), JellyfinError> {
+        info!("Reporting client capabilities for device_id: {}", device_id);
+        let (api_key, _) = self.ensure_authenticated()?;
+        let url = self.build_url("/Sessions/Capabilities/Full");
+
+        // --- Construct X-Emby-Authorization Header (using placeholders/defaults) ---
+        let client_name = "r-jellycli"; // Hardcoded as in old version
+        let device_name = hostname::get() // Use hostname crate
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "rust-client".to_string());
+        // Use the device_id passed as an argument (Placeholder removed in previous attempt)
+        let version = env!("CARGO_PKG_VERSION"); // Get version from Cargo.toml
+
+        let auth_header_value = format!(
+            "MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
+            client_name, device_name, device_id, version
+        );
+        debug!("Constructed X-Emby-Authorization: {}", auth_header_value);
+
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            "X-Emby-Authorization",
+            header::HeaderValue::from_str(&auth_header_value)
+                .map_err(|e| JellyfinError::Other(format!("Failed to create auth header value: {}", e)))?
+        );
+        // Add the token header as well
+        headers.insert(
+            "X-Emby-Token",
+             header::HeaderValue::from_str(api_key)
+                .map_err(|e| JellyfinError::Other(format!("Invalid API key for header: {}", e)))?
+        );
+        // --- End Header Construction ---
+
+        debug!("Sending POST request with JSON body (DTO directly) and custom header to: {}", url);
+        // Send the report struct directly as the JSON body, based on server log signature
+        let body = report;
+        trace!(target: API_LOG_TARGET, "POST JSON body for /Sessions/Capabilities/Full: {:?}", body);
+
+        let response = self.client
+            .post(&url)
+            .headers(headers) // Use the constructed headers
+            .json(body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status == StatusCode::NO_CONTENT {
+            debug!("POST request successful with status: {}", status);
+            Ok(())
+        } else {
+            let error_text = response.text().await.unwrap_or_else(|_| "Failed to read error body".to_string());
+            error!("POST request failed. Status: {}, Body: {}", status, error_text);
+             match status {
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(JellyfinError::Authentication(format!("Authentication failed ({}): {}", status, error_text))),
+                StatusCode::NOT_FOUND => Err(JellyfinError::NotFound(format!("Endpoint not found ({}): {}", status, error_text))),
+                _ => Err(JellyfinError::InvalidResponse(format!(
+                    "Unexpected status code {} (expected 204 No Content). Body: {}",
+                    status, error_text
+                ))),
+            }
+        }
     }
 
 
@@ -577,8 +669,9 @@ impl JellyfinApiContract for JellyfinClient {
     fn play_session_id(&self) -> &str {
         JellyfinClient::play_session_id(self)
     }
-    async fn report_capabilities(&self, report: &CapabilitiesReport) -> Result<(), JellyfinError> {
-        JellyfinClient::report_capabilities(self, report).await
+    // Trait implementation update
+    async fn report_capabilities(&self, device_id: &str, report: &CapabilitiesReport) -> Result<(), JellyfinError> {
+        JellyfinClient::report_capabilities(self, device_id, report).await
     }
 }
 
