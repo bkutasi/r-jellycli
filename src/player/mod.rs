@@ -255,14 +255,11 @@ pub async fn run_reporting_task(
                             // Still using the initial short poll interval
                             if live_position_ticks > 0 {
                                 // First non-zero position detected!
-                                info!(target: REPORTING_LOG_TARGET, item_id = %item.id, "First non-zero position detected via Timer ({} ticks). Sending initial report and switching to 10s interval.", live_position_ticks);
-                                let mut progress_info = build_progress_info(&current_state, "timeupdate");
-                                progress_info.position_ticks = live_position_ticks;
-                                if let Err(e) = report_playback_progress(api.as_ref(), &progress_info).await {
-                                    warn!(target: REPORTING_LOG_TARGET, item_id = %item.id, "Failed to send initial progress report (Timer): {}", e);
-                                }
+                                info!(target: REPORTING_LOG_TARGET, item_id = %item.id, "First non-zero position detected via Timer ({} ticks). Switching to 10s interval.", live_position_ticks);
+                                // We no longer send the report here; playback_starter handles the initial 0-tick report.
+                                // We just switch the interval and mark that the initial phase is over.
                                 initial_report_sent = true;
-                                last_reported_ticks = Some(live_position_ticks);
+                                // last_reported_ticks will be set by the regular reporting logic on the next tick.
                                 // Switch to the standard reporting interval
                                 report_timer = interval(REPORTING_INTERVAL);
                                 // We need to tick immediately after resetting to maintain the new interval timing
