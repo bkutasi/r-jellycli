@@ -61,7 +61,7 @@
   - `/Users/{UserId}/Items?ParentId={ParentId}`: Fetches items within a folder.
   - `/Items/{ItemId}/Download`: Used to generate streaming URLs (indirectly).
   - `/Sessions/Playing` (POST): Reports playback start.
-  - `/Sessions/Playing/Progress` (POST): Reports playback progress periodically.
+  - `/Sessions/Playing/Progress` (POST): Reports playback progress (Note: Periodic client-side reporting disabled, see 'Audio Playback and Reporting' section).
   - `/Sessions/Playing/Stopped` (POST): Reports playback stop.
 
 ### API Reference
@@ -148,6 +148,17 @@ RUST_LOG=debug cargo run -- --server-url ...
    c. Constructs the appropriate report body (`PlaybackStartInfoBody`, `PlaybackProgressInfoBody`, `PlaybackStopInfoBody`).
    d. Calls the relevant function in `src/jellyfin/reporter.rs` (e.g., `report_playback_progress`).
    e. The reporter function calls the corresponding method on the `JellyfinApiContract` trait (implemented by `src/jellyfin/api.rs`), which sends the HTTP POST request to the Jellyfin server.
+
+### Important Note on Progress Reporting
+
+Initial implementations included periodic progress reports (`/Sessions/Playing/Progress`) sent from the client based on the audio decoding position (`SharedProgress`). However, debugging revealed that these frequent client-side updates conflicted with Jellyfin's own server-side progress tracking and UI updates, leading to inaccurate progress display in Jellyfin interfaces.
+
+As a result, the periodic client-side progress reporting mechanism (specifically the timed loop within `run_reporting_task` in `src/player/mod.rs` that sends `PlaybackProgressInfoBody`) has been disabled (commented out). The system now relies solely on:
+
+1.  The initial `/Sessions/Playing` report sent when playback starts.
+2.  Jellyfin server's internal mechanisms for tracking playback progress based on the stream duration and elapsed time.
+
+This approach ensures a more consistent and accurate progress representation within the Jellyfin ecosystem.
 ## Testing Strategy
 
 ### Unit Testing

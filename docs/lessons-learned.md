@@ -74,6 +74,16 @@
 
 ## Technical Implementation Challenges
 
+1.  **Debugging Playback Progress Reporting Conflicts**:
+    *   **Initial Problem**: Inaccurate playback progress displayed in Jellyfin UI.
+    *   **Debugging Journey**:
+        *   Initially suspected issues with timestamp accuracy from the Symphonia audio decoder.
+        *   Explored potential workarounds related to timestamp calculation.
+        *   Discovered the root cause: Frequent periodic progress reports sent by the client (`/Sessions/Playing/Progress` via HTTP POST) were conflicting with Jellyfin's internal server-side progress tracking, leading to inconsistent updates.
+    *   **Resolution**: Disabled (commented out) the periodic client-side progress reporting loop in `src/player/mod.rs`. The system now relies only on the initial `PlaybackStart` report and the server's own tracking mechanisms.
+    *   **Lesson**: Be mindful of potential conflicts between client-driven state reporting and server-side state management, especially for frequently updated values like playback progress. Sometimes, less frequent reporting or relying on server inference is more robust.
+
+
 ## Audio Processing Lessons
 
         1.  **Sample Rate Mismatches (Resampling)**:

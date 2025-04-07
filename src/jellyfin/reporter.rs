@@ -119,7 +119,7 @@ pub async fn report_playback_progress(
 
     match api.report_playback_progress(&report).await {
         Ok(_) => {
-            // Use trace for frequent progress reports to avoid log spam
+            // Use trace for progress reports (which are infrequent now) to avoid log spam if they become frequent again.
             // debug!("Successfully reported playback progress for item {}", progress_info.item_id);
             Ok(())
         }

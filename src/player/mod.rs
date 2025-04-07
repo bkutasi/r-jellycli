@@ -193,9 +193,9 @@ pub async fn run_reporting_task(
                         // The snapshot is created using the latest available position at the time of the event.
                         current_state = new_state;
                         if let Some(_item) = &current_state.current_item {
-                            // State updates are mainly for pause/volume changes now,
-                            // just log them. The timer handles progress reporting.
-                            trace!(target: REPORTING_LOG_TARGET, item_id = ?current_state.current_item.as_ref().map(|i|&i.id), "StateUpdate received.");
+                            // State updates (pause/volume) are logged but don't trigger reports here.
+                            // The timer tick below handles detecting the initial non-zero position.
+                            trace!(target: REPORTING_LOG_TARGET, item_id = ?current_state.current_item.as_ref().map(|i|&i.id), "StateUpdate received (logging only).");
                         } else {
                              warn!(target: REPORTING_LOG_TARGET, "StateUpdate received but no current item to report for.");
                         }
@@ -255,12 +255,12 @@ pub async fn run_reporting_task(
                             // Still using the initial short poll interval
                             if live_position_ticks > 0 {
                                 // First non-zero position detected!
-                                info!(target: REPORTING_LOG_TARGET, item_id = %item.id, "First non-zero position detected via Timer ({} ticks). Switching to 10s interval.", live_position_ticks);
-                                // We no longer send the report here; playback_starter handles the initial 0-tick report.
-                                // We just switch the interval and mark that the initial phase is over.
-                                initial_report_sent = true;
-                                // last_reported_ticks will be set by the regular reporting logic on the next tick.
-                                // Switch to the standard reporting interval
+                                info!(target: REPORTING_LOG_TARGET, item_id = %item.id, "First non-zero position detected via Timer ({} ticks). Switching to {}s interval.", live_position_ticks, REPORTING_INTERVAL.as_secs());
+                                // The initial 0-tick report was sent by playback_starter.
+                                // This timer tick only serves to detect the first movement and switch the interval.
+                                initial_report_sent = true; // Mark that we've passed the initial phase.
+                                // last_reported_ticks will be updated below, even though periodic reports are off.
+                                // Switch to the standard (longer) polling interval.
                                 report_timer = interval(REPORTING_INTERVAL);
                                 // We need to tick immediately after resetting to maintain the new interval timing
                                 report_timer.tick().await;
@@ -272,12 +272,27 @@ pub async fn run_reporting_task(
                             // Initial report already sent, now using 10s interval
                             if Some(live_position_ticks) != last_reported_ticks {
                                 trace!(target: REPORTING_LOG_TARGET, item_id = %item.id, "Standard timer ticked. Reporting progress ({} ticks).", live_position_ticks);
-                                let mut progress_info = build_progress_info(&current_state, "timeupdate");
-                                progress_info.position_ticks = live_position_ticks;
-                                if let Err(e) = report_playback_progress(api.as_ref(), &progress_info).await {
-                                    warn!(target: REPORTING_LOG_TARGET, item_id = %item.id, "Failed to report progress (Timer): {}", e);
-                                }
+                                // --- IMPORTANT: Periodic Progress Reporting Disabled ---
+                                // Jellyfin server/UI appears to handle progress updates internally based on
+                                // the initial PlaybackStart report and track duration. Sending frequent
+                                // 'timeupdate' events from the client conflicts with this, causing inaccurate
+                                // progress display in the UI. Disabling these periodic reports resolves the issue.
+                                // The client still reports PlaybackStart, PlaybackStop, and potentially
+                                // progress updates triggered by pause/seek events if implemented later.
+                                // ---------------------------------------------------------
+                                // let mut progress_info = build_progress_info(&current_state, "timeupdate");
+                                // progress_info.position_ticks = live_position_ticks;
+                                // if let Err(e) = report_playback_progress(api.as_ref(), &progress_info).await {
+                                //     warn!(target: REPORTING_LOG_TARGET, item_id = %item.id, "Failed to report progress (Timer): {}", e);
+                                // }
+                                // last_reported_ticks = Some(live_position_ticks);
+                                trace!(target: REPORTING_LOG_TARGET, item_id = %item.id, "Periodic reporting disabled. Ticks would be: {}", live_position_ticks);
+                                // Still update last_reported_ticks to prevent spamming this trace log if position doesn't change
                                 last_reported_ticks = Some(live_position_ticks);
+                                trace!(target: REPORTING_LOG_TARGET, item_id = %item.id, "Periodic reporting disabled. Ticks would be: {}", live_position_ticks);
+                                // Still update last_reported_ticks to prevent spamming this trace log if position doesn't change
+                                last_reported_ticks = Some(live_position_ticks);
+
                             } else {
                                 trace!(target: REPORTING_LOG_TARGET, item_id = %item.id, "Standard timer ticked, but position unchanged. Skipping report.");
                             }

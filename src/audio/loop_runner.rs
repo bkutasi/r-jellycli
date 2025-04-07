@@ -262,6 +262,8 @@ impl PlaybackLoopRunner {
 
                     // --- Update Progress ---
                     // Update regardless of processing result, using the original timestamp
+                    trace!(target: LOG_TARGET, "Updating progress with TS: {}, TimeBase: {:?}", current_ts, track_time_base); // Log TS and TimeBase
+                    debug!(target: LOG_TARGET, "Passing to update_progress: current_ts = {}, track_time_base = {:?}", current_ts, track_time_base);
                     self.state_manager.lock().await.update_progress(current_ts, track_time_base).await;
 
                     // --- Handle Processing Result ---

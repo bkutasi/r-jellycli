@@ -58,6 +58,7 @@ impl PlaybackStateManager {
         // Removed rate limiting - update progress on every call
 
         if let (Some(progress_arc), Some(time_base)) = (&self.progress_info, track_time_base) {
+            // Calculate current playback time in seconds using the original timestamp and time base.
             let current_seconds = time_base.calc_time(current_ts).seconds as f64
                 + time_base.calc_time(current_ts).frac;
 

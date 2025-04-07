@@ -102,8 +102,10 @@ impl SymphoniaDecoder {
         let channels = track.codec_params.channels; // Don't error if None yet
         let current_spec = channels.map(|chans| SignalSpec::new(sample_rate, chans));
         let sample_format = track.codec_params.sample_format;
+        let time_base = track.codec_params.time_base; // Get time_base for logging
 
-        debug!(target: LOG_TARGET, "Symphonia decoder created. Spec (potentially incomplete): {:?}, Sample Format: {:?}", current_spec, sample_format);
+        debug!(target: LOG_TARGET, "Symphonia decoder created. Spec (potentially incomplete): {:?}, Sample Format: {:?}, TimeBase: {:?}", current_spec, sample_format, time_base);
+        debug!(target: LOG_TARGET, "Detailed Params: Sample Rate = {:?}, Time Base = {:?}", track.codec_params.sample_rate, track.codec_params.time_base);
 
         Ok(Self {
             format_reader: Some(format_reader),
